@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+data/
+node_modules/
+dist/
+build/
+managed_components/
+sdkconfig
+sdkconfig.old
