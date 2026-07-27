@@ -305,16 +305,29 @@ class Hub:
                 log.exception("metrics computation failed")
 
     def _emit_metrics(self) -> None:
-        if not self.clients:
-            return
+        """Compute always; broadcast only when someone is listening.
+
+        Skipping the computation when no browser is connected looks like an easy saving and is
+        a bug. The presence detector is stateful: it needs 30 s of quiet to calibrate, and it
+        drifts its baseline while the room reads as empty. If it only runs while a tab is open,
+        then opening a tab starts a calibration over whatever happens to be in the ring —
+        which, if you walked over to the laptop to open it, is you walking. The observed
+        symptom is an empty-room threshold hundreds of times too high and a detector that never
+        fires again.
+
+        It is also just wrong for the product: an overnight activity record is not supposed to
+        depend on a browser being open all night.
+        """
         now = time.time()
         for state in self.nodes.values():
             metrics = self.compute_metrics(state)
             if metrics is None:
                 continue
             state.last_metrics = metrics
-            self.broadcast({"type": "metrics", "t": now, **metrics})
-        self.broadcast({"type": "nodes", "nodes": self.node_report(now)})
+            if self.clients:
+                self.broadcast({"type": "metrics", "t": now, **metrics})
+        if self.clients:
+            self.broadcast({"type": "nodes", "nodes": self.node_report(now)})
 
     def compute_metrics(self, state: NodeState) -> dict | None:
         ring = state.ring
@@ -425,6 +438,7 @@ class Hub:
                 "window_s": s.heart.window_s,
                 "band": list(s.heart.band),
                 "n_subcarriers": s.heart.n_subcarriers,
+                "gate_quantile": s.heart.selection.gate_quantile,
             },
         }
 
