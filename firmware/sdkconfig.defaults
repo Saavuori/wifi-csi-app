@@ -1,0 +1,46 @@
+# Target. The plan calls for full-size ESP32-S3 DevKitC boards; the Zero/SuperMini clones are
+# reported to overheat and fail during sustained CSI sessions.
+CONFIG_IDF_TARGET="esp32s3"
+
+# --- The two settings that decide whether this works at all ---------------------------------
+#
+# The CSI callback runs in the WiFi driver task on Core 0. The packer/sender task is pinned to
+# Core 1 (see csi_net.c). But lwIP's TCP/IP task defaults to Core 0, so without the line below
+# the actual sendto work lands right back on the core we were trying to keep clear, and the
+# contention is still there — just harder to find. Both are required.
+CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU1=y
+CONFIG_ESP_WIFI_TASK_CORE_ID_0=y
+
+# A 1 ms tick, so an 80-100 Hz transmit period is a whole number of ticks. At the 10 ms default
+# the period rounds and the transmit rate is quietly wrong.
+CONFIG_FREERTOS_HZ=1000
+
+# --- WiFi buffers ---------------------------------------------------------------------------
+# CSI arrives with every received frame; the defaults are sized for a device that mostly idles.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=64
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=64
+CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=y
+CONFIG_ESP_WIFI_RX_BA_WIN=16
+
+# CSI must be compiled in; it is off by default.
+CONFIG_ESP_WIFI_CSI_ENABLED=y
+
+# --- lwIP -----------------------------------------------------------------------------------
+CONFIG_LWIP_UDP_RECVMBOX_SIZE=32
+CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
+
+# --- Watchdog ---------------------------------------------------------------------------------
+# Leave the task watchdog on. If a change ever makes the CSI callback block, the resulting trip
+# is the fastest possible way to find out — much faster than wondering why the rate sagged.
+CONFIG_ESP_TASK_WDT_INIT=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
+
+# --- Performance --------------------------------------------------------------------------
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# Power save off. With it on the radio sleeps between beacons and the steady stream becomes
+# bursts, which is useless for frequency analysis regardless of timestamp quality.
+CONFIG_ESP_WIFI_PS_NONE=y

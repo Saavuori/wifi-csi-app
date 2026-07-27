@@ -1,0 +1,97 @@
+menu "CSI node"
+
+    choice CSI_ROLE
+        prompt "Node role"
+        default CSI_ROLE_RECEIVER
+        help
+            The plan's topology B uses one of each: a transmitter putting frames in the air at
+            a fixed rate, and a receiver measuring them. Flash one board as each.
+
+        config CSI_ROLE_RECEIVER
+            bool "Receiver (captures CSI, sends it to the server)"
+
+        config CSI_ROLE_TRANSMITTER
+            bool "Transmitter (emits frames at a fixed rate)"
+    endchoice
+
+    config CSI_NODE_ID
+        int "Node ID"
+        range 1 254
+        default 1
+        help
+            Goes in every frame. 0 and 255 are reserved. Give each board a different one, or
+            the server will interleave two rooms into a single history.
+
+    menu "WiFi"
+        config CSI_WIFI_SSID
+            string "SSID"
+            default "csi-net"
+
+        config CSI_WIFI_PASSWORD
+            string "Password"
+            default ""
+
+        config CSI_WIFI_MAX_RETRY
+            int "Reconnect attempts before giving up"
+            default 20
+    endmenu
+
+    menu "Receiver"
+        depends on CSI_ROLE_RECEIVER
+
+        config CSI_SERVER_HOST
+            string "Server IPv4 address"
+            default "192.168.1.10"
+            help
+                Where to send CSI frames. An address, not a hostname: DNS resolution is one
+                more thing to fail on a device with no operator.
+
+        config CSI_SERVER_PORT
+            int "Server UDP port"
+            default 5566
+
+        config CSI_PEER_MAC
+            string "Transmitter MAC to filter on"
+            default ""
+            help
+                Only report CSI for frames from this source. Leave empty to capture from every
+                station on the channel, which is useful for a first smoke test and misleading
+                for anything else — the rate becomes whatever the neighbours are doing.
+
+        config CSI_SENDER_PRIORITY
+            int "Sender task priority"
+            default 6
+            help
+                Above the default application priority so a frame does not sit in the ring
+                behind unrelated work, and below the WiFi driver's so it cannot starve it.
+    endmenu
+
+    menu "Transmitter"
+        depends on CSI_ROLE_TRANSMITTER
+
+        config CSI_TX_TARGET
+            string "Destination IPv4 address"
+            default "255.255.255.255"
+            help
+                Broadcast by default: nothing has to be listening, and the frame still goes out
+                over the air, which is all the receiver needs.
+
+        config CSI_TX_PORT
+            int "Destination UDP port"
+            default 5567
+
+        config CSI_TX_RATE_HZ
+            int "Transmit rate (Hz)"
+            range 1 500
+            default 100
+            help
+                Target ~80-100 Hz. That is far above Nyquist for the ~2 Hz cardiac band and
+                leaves headroom for decimation. Needs CONFIG_FREERTOS_HZ high enough that the
+                period is a whole number of ticks — sdkconfig.defaults sets 1000.
+    endmenu
+
+    config CSI_REPORT_PERIOD_S
+        int "Statistics log period (seconds)"
+        default 10
+
+endmenu
