@@ -109,6 +109,30 @@ export function select(options: {
   );
 }
 
+/**
+ * Two-column view scaffold: content on the left, controls on the right.
+ *
+ * Explicit columns rather than letting panels flow into a grid. With auto-flow, the column a
+ * panel lands in depends on how many panels came before it, so adding a summary panel at the
+ * top of a view silently pushes the main plot into the 320px control column.
+ */
+export function viewLayout(options: {
+  main: (Node | null)[];
+  side?: (Node | null)[];
+  className?: string;
+}): HTMLElement {
+  const main = el("div", { class: "col col-main" }, ...options.main);
+  const columns: Node[] = [main];
+  if (options.side !== undefined && options.side.length > 0) {
+    columns.push(el("div", { class: "col col-side" }, ...options.side));
+  }
+  return el(
+    "div",
+    { class: `view ${options.side?.length ? "view-split" : ""} ${options.className ?? ""}` },
+    ...columns,
+  );
+}
+
 export function stat(label: string, value: string, className = ""): HTMLElement {
   return el(
     "div",

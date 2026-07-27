@@ -192,21 +192,28 @@ input[type="text"] {
 
 .view {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 320px;
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
-  align-items: start;
   min-height: 100%;
 }
 
-.view-tuner {
-  grid-template-columns: minmax(0, 420px) minmax(0, 1fr);
+.view-split {
+  grid-template-columns: minmax(0, 1fr) 320px;
 }
 
 @media (max-width: 1000px) {
-  .view,
-  .view-tuner {
+  .view-split {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+/* Each column is its own flex stack, so `panel-grow` takes the slack in the column it is in
+   rather than competing with panels in the other one. */
+.col {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
 }
 
 /* -- panels ------------------------------------------------------------------------------ */
@@ -223,7 +230,7 @@ input[type="text"] {
 }
 
 .panel-grow {
-  grid-row: span 3;
+  flex: 1;
   min-height: 420px;
 }
 

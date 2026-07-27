@@ -93,7 +93,7 @@ def test_delete_removes_the_files(client):
     feed(client.hub, 50)
     client.post("/api/recording/stop")
 
-    path = client.hub.sessions.recordings_dir if False else client.hub.sessions.directory
+    path = client.hub.sessions.directory
     assert (path / f"{session_id}.csi").exists()
 
     assert client.delete(f"/api/sessions/{session_id}").status_code == 200

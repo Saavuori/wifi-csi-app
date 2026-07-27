@@ -1,0 +1,47 @@
+# Two stages: build the front end with node, run with python. The runtime image has no node in
+# it — the web app is static files by the time the server serves them.
+
+FROM docker.io/library/node:22-alpine AS web
+
+WORKDIR /build
+COPY web/package.json web/package-lock.json* ./
+RUN npm install --no-audit --no-fund
+COPY web/ ./
+RUN npm run build
+
+
+FROM docker.io/library/python:3.12-slim
+
+# scipy needs a BLAS at runtime. Installing it here rather than letting pip pull a wheel that
+# bundles its own keeps the image smaller and the numerics consistent with the base distro.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libopenblas0 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY server/pyproject.toml ./server/
+COPY server/csi ./server/csi
+RUN pip install --no-cache-dir ./server
+
+COPY --from=web /build/dist ./web/dist
+
+ENV CSI_WEB_DIR=/app/web/dist \
+    CSI_DATA_DIR=/data \
+    CSI_UDP_HOST=0.0.0.0 \
+    CSI_UDP_PORT=5566 \
+    CSI_HTTP_PORT=8080 \
+    PYTHONUNBUFFERED=1
+
+# Recordings live on a volume. At 80 Hz a node writes roughly a gigabyte a day, and losing a
+# session is far more expensive than the disk it takes.
+VOLUME ["/data"]
+
+EXPOSE 8080/tcp 5566/udp
+
+# The nodes send UDP from the LAN, so this container needs to be reachable on 5566 from outside
+# the host's loopback — see deploy/README.md for the podman run line.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s \
+    CMD python -c "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/api/healthz').read()"
+
+CMD ["python", "-m", "csi"]

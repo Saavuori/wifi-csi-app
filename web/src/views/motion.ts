@@ -5,7 +5,7 @@
 // is that the enter and exit levels differ, and a plot that hides that makes every state change
 // look either obvious or inexplicable. Seeing the gap is how you decide whether to widen it.
 
-import { el, fitCanvas, slider, toggle } from "../lib/dom";
+import { el, fitCanvas, slider, toggle, viewLayout } from "../lib/dom";
 import type { Metrics } from "../lib/messages";
 import { beginPlot, drawBand, drawFrame, drawHorizontal, drawSeries, plotArea } from "../lib/plot";
 import { store } from "../lib/store";
@@ -195,24 +195,31 @@ export function motionView(): View {
     ),
   );
 
-  const root = el(
-    "div",
-    { class: "view" },
-    el(
-      "div",
-      { class: "panel panel-grow" },
+  const root = viewLayout({
+    main: [
       el(
         "div",
-        { class: "panel-head" },
-        el("h2", {}, "Motion timeline"),
-        badge,
-        el("div", { class: "spacer" }),
-        readout,
+        { class: "panel panel-grow" },
+        el(
+          "div",
+          { class: "panel-head" },
+          el("h2", {}, "Motion timeline"),
+          badge,
+          el("div", { class: "spacer" }),
+          readout,
+        ),
+        el("div", { class: "plot-frame" }, canvas),
       ),
-      el("div", { class: "plot-frame" }, canvas),
-    ),
-    el("div", { class: "panel" }, el("div", { class: "panel-head" }, el("h2", {}, "Detection")), controls),
-  );
+    ],
+    side: [
+      el(
+        "div",
+        { class: "panel" },
+        el("div", { class: "panel-head" }, el("h2", {}, "Detection")),
+        controls,
+      ),
+    ],
+  });
 
   let animation = 0;
   let unsubscribe: (() => void) | null = null;

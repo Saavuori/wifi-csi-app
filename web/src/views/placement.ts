@@ -9,7 +9,7 @@
 // history so you can tell whether the last move helped, and nothing else competing for
 // attention while you are across the room holding a board.
 
-import { el, fitCanvas } from "../lib/dom";
+import { el, fitCanvas, viewLayout } from "../lib/dom";
 import type { Metrics } from "../lib/messages";
 import { beginPlot, drawFrame, drawSeries } from "../lib/plot";
 import { store } from "../lib/store";
@@ -117,16 +117,16 @@ export function placementView(): View {
     );
   }
 
-  const root = el(
-    "div",
-    { class: "view view-tuner" },
-    el(
-      "div",
-      { class: "panel panel-tuner" },
-      el("div", { class: "tuner" }, value, unit, verdict),
-      best,
-    ),
-    el(
+  const root = viewLayout({
+    className: "view-tuner",
+    main: [
+      el(
+        "div",
+        { class: "panel panel-tuner" },
+        el("div", { class: "tuner" }, value, unit, verdict),
+        best,
+      ),
+      el(
       "div",
       { class: "panel panel-grow" },
       el("div", { class: "panel-head" }, el("h2", {}, "Last two minutes")),
@@ -148,8 +148,8 @@ export function placementView(): View {
         },
         "Reset range",
       ),
-    ),
-  );
+    )],
+  });
 
   let animation = 0;
   let unsubscribe: (() => void) | null = null;

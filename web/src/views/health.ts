@@ -6,7 +6,7 @@
 // sequence number advances on every frame the callback accepted whether or not the ring had
 // room for it. That is the number worth watching: it does not matter where a frame was lost.
 
-import { clear, el, formatDuration, select, slider, toggle } from "../lib/dom";
+import { clear, el, formatDuration, select, slider, toggle, viewLayout } from "../lib/dom";
 import type { NodeHealth, ServerConfig } from "../lib/messages";
 import { store } from "../lib/store";
 import type { View } from "./view";
@@ -151,23 +151,30 @@ export function healthView(): View {
     );
   }
 
-  const root = el(
-    "div",
-    { class: "view" },
-    el("div", { class: "panel panel-grow" }, el("div", { class: "panel-head" }, el("h2", {}, "Nodes")), grid),
-    el(
-      "div",
-      { class: "panel" },
-      el("div", { class: "panel-head" }, el("h2", {}, "Preprocessing")),
-      preprocessing,
+  const root = viewLayout({
+    main: [
       el(
-        "p",
-        { class: "hint" },
-        "These apply identically to live and replayed frames — that is what makes a recording a " +
-          "faithful stand-in for the room.",
+        "div",
+        { class: "panel panel-grow" },
+        el("div", { class: "panel-head" }, el("h2", {}, "Nodes")),
+        grid,
       ),
-    ),
-  );
+    ],
+    side: [
+      el(
+        "div",
+        { class: "panel" },
+        el("div", { class: "panel-head" }, el("h2", {}, "Preprocessing")),
+        preprocessing,
+        el(
+          "p",
+          { class: "hint" },
+          "These apply identically to live and replayed frames — that is what makes a " +
+            "recording a faithful stand-in for the room.",
+        ),
+      ),
+    ],
+  });
 
   const unsubscribes: (() => void)[] = [];
 

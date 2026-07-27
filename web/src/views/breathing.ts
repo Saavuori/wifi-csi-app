@@ -9,7 +9,7 @@
 // Drag it and watch the peak sharpen; that is a faster route to understanding this phase than
 // any amount of reading.
 
-import { el, fitCanvas, slider } from "../lib/dom";
+import { el, fitCanvas, slider, viewLayout } from "../lib/dom";
 import type { Metrics, VitalsState } from "../lib/messages";
 import { beginPlot, drawBand, drawFrame, drawSeries, plotArea } from "../lib/plot";
 import { store } from "../lib/store";
@@ -172,25 +172,37 @@ export function vitalsView(band: Band): View {
     );
   }
 
-  const root = el(
-    "div",
-    { class: "view" },
-    el(
-      "div",
-      { class: "panel" },
-      el("div", { class: "panel-head" }, el("h2", {}, isHeart ? "Heart rate" : "Breathing"), detail),
-      el("div", { class: "bpm" }, bpmValue, bpmUnit),
-    ),
-    el(
-      "div",
-      { class: "panel panel-grow" },
-      el("div", { class: "panel-head" }, el("h3", {}, "Filtered waveform")),
-      el("div", { class: "plot-frame plot-short" }, waveCanvas),
-      el("div", { class: "panel-head" }, el("h3", {}, "Spectrum")),
-      el("div", { class: "plot-frame plot-short" }, spectrumCanvas),
-    ),
-    el("div", { class: "panel" }, el("div", { class: "panel-head" }, el("h2", {}, "Analysis")), controls),
-  );
+  const root = viewLayout({
+    main: [
+      el(
+        "div",
+        { class: "panel" },
+        el(
+          "div",
+          { class: "panel-head" },
+          el("h2", {}, isHeart ? "Heart rate" : "Breathing"),
+          detail,
+        ),
+        el("div", { class: "bpm" }, bpmValue, bpmUnit),
+      ),
+      el(
+        "div",
+        { class: "panel panel-grow" },
+        el("div", { class: "panel-head" }, el("h3", {}, "Filtered waveform")),
+        el("div", { class: "plot-frame" }, waveCanvas),
+        el("div", { class: "panel-head" }, el("h3", {}, "Spectrum")),
+        el("div", { class: "plot-frame" }, spectrumCanvas),
+      ),
+    ],
+    side: [
+      el(
+        "div",
+        { class: "panel" },
+        el("div", { class: "panel-head" }, el("h2", {}, "Analysis")),
+        controls,
+      ),
+    ],
+  });
 
   let animation = 0;
   let unsubscribeMetrics: (() => void) | null = null;

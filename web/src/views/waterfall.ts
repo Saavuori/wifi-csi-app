@@ -23,7 +23,7 @@
 // OffscreenCanvas. Steps 1-3 remove essentially all of the pain; that one is the follow-up.
 
 import { colormap, colormapGradient, type ColormapName } from "../lib/colormap";
-import { el, fitCanvas, select, slider, toggle } from "../lib/dom";
+import { el, fitCanvas, select, slider, toggle, viewLayout } from "../lib/dom";
 import type { FrameBatch, Metrics } from "../lib/messages";
 import { store } from "../lib/store";
 import type { View } from "./view";
@@ -317,10 +317,10 @@ export function waterfallView(): View {
   const legend = el("div", { class: "legend-bar" });
   legend.style.background = colormapGradient(options.colormap);
 
-  const root = el(
-    "div",
-    { class: "view view-waterfall" },
-    el(
+  const root = viewLayout({
+    className: "view-waterfall",
+    main: [
+      el(
       "div",
       { class: "panel panel-grow" },
       el(
@@ -341,8 +341,8 @@ export function waterfallView(): View {
           el("span", {}, "low"),
         ),
       ),
-    ),
-    el(
+    )],
+    side: [el(
       "div",
       { class: "panel" },
       el("div", { class: "panel-head" }, el("h2", {}, "Display")),
@@ -354,8 +354,8 @@ export function waterfallView(): View {
           "no downstream processing rescues a bad signal, and you want to know that in an " +
           "evening rather than a month.",
       ),
-    ),
-  );
+    )],
+  });
 
   let unsubscribeFrames: (() => void) | null = null;
   let unsubscribeMetrics: (() => void) | null = null;

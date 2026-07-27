@@ -5,7 +5,7 @@
 // the floor again. The capture labels below are the ones from the plan's table, offered as
 // buttons so a session gets labelled while you still remember what it was.
 
-import { clear, el, formatBytes, formatDuration } from "../lib/dom";
+import { clear, el, formatBytes, formatDuration, viewLayout } from "../lib/dom";
 import type { ReplayState, Session } from "../lib/messages";
 import { store } from "../lib/store";
 import type { View } from "./view";
@@ -269,23 +269,28 @@ export function sessionsView(): View {
     }
   }
 
-  const root = el(
-    "div",
-    { class: "view" },
-    el(
-      "div",
-      { class: "panel" },
-      el("div", { class: "panel-head" }, el("h2", {}, "Recording")),
-      recordingBox,
-    ),
-    el("div", { class: "panel" }, el("div", { class: "panel-head" }, el("h2", {}, "Replay")), replayBox),
-    el(
-      "div",
-      { class: "panel panel-grow" },
-      el("div", { class: "panel-head" }, el("h2", {}, "Sessions")),
-      list,
-    ),
-  );
+  const root = viewLayout({
+    main: [
+      el(
+        "div",
+        { class: "panel" },
+        el("div", { class: "panel-head" }, el("h2", {}, "Recording")),
+        recordingBox,
+      ),
+      el(
+        "div",
+        { class: "panel" },
+        el("div", { class: "panel-head" }, el("h2", {}, "Replay")),
+        replayBox,
+      ),
+      el(
+        "div",
+        { class: "panel panel-grow" },
+        el("div", { class: "panel-head" }, el("h2", {}, "Sessions")),
+        list,
+      ),
+    ],
+  });
 
   const unsubscribes: (() => void)[] = [];
 

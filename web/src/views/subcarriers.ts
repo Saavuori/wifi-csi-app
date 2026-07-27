@@ -7,7 +7,7 @@
 // It defaults to the subcarriers the analysis has selected, so what you are looking at is what
 // the BPM number is computed from rather than an unrelated sample.
 
-import { el, fitCanvas, slider, toggle } from "../lib/dom";
+import { el, fitCanvas, slider, toggle, viewLayout } from "../lib/dom";
 import type { FrameBatch, Metrics } from "../lib/messages";
 import { SERIES_COLORS, beginPlot, drawFrame, drawSeries } from "../lib/plot";
 import { store } from "../lib/store";
@@ -184,22 +184,29 @@ export function subcarrierView(): View {
     ),
   );
 
-  const root = el(
-    "div",
-    { class: "view" },
-    el(
-      "div",
-      { class: "panel panel-grow" },
+  const root = viewLayout({
+    main: [
       el(
         "div",
-        { class: "panel-head" },
-        el("h2", {}, "Subcarrier lines"),
-        el("div", { class: "panel-note" }, legend),
+        { class: "panel panel-grow" },
+        el(
+          "div",
+          { class: "panel-head" },
+          el("h2", {}, "Subcarrier lines"),
+          el("div", { class: "panel-note" }, legend),
+        ),
+        el("div", { class: "plot-frame" }, canvas),
       ),
-      el("div", { class: "plot-frame" }, canvas),
-    ),
-    el("div", { class: "panel" }, el("div", { class: "panel-head" }, el("h2", {}, "Traces")), controls),
-  );
+    ],
+    side: [
+      el(
+        "div",
+        { class: "panel" },
+        el("div", { class: "panel-head" }, el("h2", {}, "Traces")),
+        controls,
+      ),
+    ],
+  });
 
   let animation = 0;
   let unsubscribeFrames: (() => void) | null = null;
