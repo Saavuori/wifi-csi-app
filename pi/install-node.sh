@@ -17,15 +17,21 @@
 #     --iface NAME       wireless interface (default wlan0)
 #     --ap MAC           only measure frames from this transmitter (default: the associated AP)
 #     --probe-hz N       ping rate that generates the traffic to measure (default 100)
-#     --repo URL         nexmon_csi fork to build
+#     --repo URL         nexmon_csi fork to build (default: Saavuori/nexmon_csi)
 #     --branch NAME      branch of that fork
+#     --nexmon-repo URL  base nexmon tree to build it against (default: seemoo-lab/nexmon)
 #     --skip-build       assume the firmware is already patched; just install the service
 #     --uninstall        remove the service and restore the stock firmware
 #     --yes              assume yes for prompts
 #
 set -euo pipefail
 
-NEXMON_REPO="https://github.com/seemoo-lab/nexmon.git"
+# Two repositories, and only one of them is ours. The base nexmon tree — the toolchain and the
+# firmware patching framework — is used unmodified from upstream. The CSI patch that goes into
+# patches/$CHIP/$FW_VERSION is our fork, because upstream's takes the Wi-Fi connection down; see
+# pi/README.md. Both are overridable, by flag or by environment, so a different fork or a local
+# mirror needs no edit to this file.
+NEXMON_REPO="${CSI_NEXMON_BASE_REPO:-https://github.com/seemoo-lab/nexmon.git}"
 CSI_REPO="${CSI_NEXMON_REPO:-https://github.com/Saavuori/nexmon_csi.git}"
 CSI_BRANCH="${CSI_NEXMON_BRANCH:-claude/rpi-wifi-csi-capture-368a70}"
 
@@ -87,10 +93,11 @@ while [ $# -gt 0 ]; do
         --probe-hz)   PROBE_HZ="${2:?--probe-hz needs a number}"; shift ;;
         --repo)       CSI_REPO="${2:?--repo needs a URL}"; shift ;;
         --branch)     CSI_BRANCH="${2:?--branch needs a name}"; shift ;;
+        --nexmon-repo) NEXMON_REPO="${2:?--nexmon-repo needs a URL}"; shift ;;
         --skip-build) SKIP_BUILD=1 ;;
         --uninstall)  UNINSTALL=1 ;;
         --yes|-y)     ASSUME_YES=1 ;;
-        -h|--help)    sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)    sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)            die "unknown option: $1 (try --help)" ;;
     esac
     shift
@@ -238,12 +245,38 @@ fetch_sources() {
         git clone --depth 1 --branch "$CSI_BRANCH" "$CSI_REPO" "$CSI_DIR" > /dev/null 2>&1 \
             || die "could not clone $CSI_REPO at branch $CSI_BRANCH"
     else
-        say "  updating the CSI patch"
-        git -C "$CSI_DIR" fetch --depth 1 origin "$CSI_BRANCH" > /dev/null 2>&1 || true
-        git -C "$CSI_DIR" checkout -q FETCH_HEAD > /dev/null 2>&1 || true
+        # A resumed run finds a checkout from the previous one, which may have been made
+        # against a different --repo. Re-point origin rather than fetching from whatever it
+        # happens to be: building upstream's patch here would come out looking like a build
+        # failure much later, in monitor mode with the network gone.
+        local origin was_ours=1
+        origin="$(git -C "$CSI_DIR" remote get-url origin 2>/dev/null || true)"
+        if [ "$origin" != "$CSI_REPO" ]; then
+            was_ours=0
+            say "  repointing the CSI patch at $CSI_REPO (was ${origin:-unknown})"
+            git -C "$CSI_DIR" remote set-url origin "$CSI_REPO" \
+                || die "could not point $CSI_DIR at $CSI_REPO"
+        fi
+
+        say "  updating the CSI patch ($CSI_BRANCH)"
+        # A failed update is survivable when the checkout is already the right tree — an
+        # offline resume should build what it has. When it is not, it is fatal: there is no
+        # falling back on a checkout of some other fork.
+        if git -C "$CSI_DIR" fetch --depth 1 origin "$CSI_BRANCH" > /dev/null 2>&1 \
+           && git -C "$CSI_DIR" checkout -q FETCH_HEAD > /dev/null 2>&1; then
+            :
+        elif [ "$was_ours" = 1 ]; then
+            warn "could not update from $CSI_REPO; building the existing checkout"
+        else
+            die "could not fetch $CSI_BRANCH from $CSI_REPO, and $CSI_DIR is a checkout of
+       ${origin:-another repository}. Remove $CSI_DIR and run this again once the
+       network is back, rather than building the wrong patch."
+        fi
     fi
 
     ok "sources in $NEXMON_DIR"
+    say "  ${dim}base nexmon: $NEXMON_REPO${reset}"
+    say "  ${dim}CSI patch:   $CSI_REPO ($CSI_BRANCH)${reset}"
 }
 
 build_firmware() {
