@@ -9,7 +9,7 @@
 // history so you can tell whether the last move helped, and nothing else competing for
 // attention while you are across the room holding a board.
 
-import { el, fitCanvas, viewLayout } from "../lib/dom";
+import { el, fitCanvas, hintBlock, viewLayout } from "../lib/dom";
 import type { Metrics } from "../lib/messages";
 import { beginPlot, drawFrame, drawSeries } from "../lib/plot";
 import { store } from "../lib/store";
@@ -56,19 +56,19 @@ export function placementView(): View {
     // whether *this* position beats the last one.
     const span = bestSeen - worstSeen;
     if (filled < 12 || span < 1.5) {
-      value.style.color = "#8b93a3";
+      value.style.color = "var(--muted)";
       verdict.textContent = "move the node — readings need something to compare against";
     } else if (isBest) {
-      value.style.color = "#06d6a0";
+      value.style.color = "var(--good)";
       verdict.textContent = "best position so far — mark this spot";
     } else if (snr >= bestSeen - 0.25 * span) {
-      value.style.color = "#06d6a0";
+      value.style.color = "var(--good)";
       verdict.textContent = `near your best (${bestSeen.toFixed(1)} dB)`;
     } else if (snr >= worstSeen + 0.5 * span) {
-      value.style.color = "#ffd166";
+      value.style.color = "var(--warn)";
       verdict.textContent = `${(bestSeen - snr).toFixed(1)} dB below your best — keep trying`;
     } else {
-      value.style.color = "#ef476f";
+      value.style.color = "var(--bad)";
       verdict.textContent = "among the worst you have seen — move it";
     }
 
@@ -127,28 +127,31 @@ export function placementView(): View {
         best,
       ),
       el(
-      "div",
-      { class: "panel panel-grow" },
-      el("div", { class: "panel-head" }, el("h2", {}, "Last two minutes")),
-      el("div", { class: "plot-frame" }, canvas),
-      el(
-        "p",
-        { class: "hint" },
-        "Move the node, wait a few seconds for the window to fill, read the number. Centimetres " +
-          "matter and body orientation matters; moving closer to the line of sight often does " +
-          "not help. Trial and error is the method the theory recommends — this view is here to " +
-          "make it quick.",
-      ),
-      el(
-        "button",
-        { class: "button", onclick: () => {
-            bestSeen = -Infinity;
-            worstSeen = Infinity;
+        "div",
+        { class: "panel panel-grow" },
+        el("div", { class: "panel-head" }, el("h3", {}, "Last two minutes")),
+        el("div", { class: "plot-frame" }, canvas),
+        // Full width and at the bottom of the view: this is the one button you press while
+        // holding a board in your other hand, several metres from the screen you are reading.
+        el(
+          "button",
+          {
+            class: "button button-wide",
+            onclick: () => {
+              bestSeen = -Infinity;
+              worstSeen = Infinity;
+            },
           },
-        },
-        "Reset range",
+          "Reset range",
+        ),
+        hintBlock(
+          "Move the node, wait a few seconds for the window to fill, read the number. Centimetres " +
+            "matter and body orientation matters; moving closer to the line of sight often does " +
+            "not help. Trial and error is the method the theory recommends — this view is here to " +
+            "make it quick.",
+        ),
       ),
-    )],
+    ],
   });
 
   let animation = 0;

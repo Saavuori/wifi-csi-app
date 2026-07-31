@@ -5,7 +5,7 @@
 // is that the enter and exit levels differ, and a plot that hides that makes every state change
 // look either obvious or inexplicable. Seeing the gap is how you decide whether to widen it.
 
-import { el, fitCanvas, slider, toggle, viewLayout } from "../lib/dom";
+import { el, fitCanvas, hintBlock, slider, toggle, viewLayout } from "../lib/dom";
 import type { Metrics } from "../lib/messages";
 import { beginPlot, drawBand, drawFrame, drawHorizontal, drawSeries, plotArea } from "../lib/plot";
 import { store } from "../lib/store";
@@ -181,14 +181,12 @@ export function motionView(): View {
     el(
       "button",
       {
-        class: "button",
+        class: "button button-wide",
         onclick: () => store.recalibrate(store.selectedNode.value),
       },
       "Recalibrate baseline",
     ),
-    el(
-      "p",
-      { class: "hint" },
+    hintBlock(
       "Leave the room before recalibrating — establishing an empty-room baseline is the one " +
         "thing the detector cannot verify for itself. Expect to redo it after a few hours; the " +
         "channel drifts.",
@@ -196,19 +194,14 @@ export function motionView(): View {
   );
 
   const root = viewLayout({
+    controlsTitle: "Detection",
     main: [
       el(
         "div",
         { class: "panel panel-grow" },
-        el(
-          "div",
-          { class: "panel-head" },
-          el("h2", {}, "Motion timeline"),
-          badge,
-          el("div", { class: "spacer" }),
-          readout,
-        ),
+        el("div", { class: "panel-head" }, el("h2", {}, "Motion"), badge),
         el("div", { class: "plot-frame" }, canvas),
+        readout,
       ),
     ],
     side: [

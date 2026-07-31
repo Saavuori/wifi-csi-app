@@ -5,7 +5,7 @@
 // the floor again. The capture labels below are the ones from the plan's table, offered as
 // buttons so a session gets labelled while you still remember what it was.
 
-import { clear, el, formatBytes, formatDuration, viewLayout } from "../lib/dom";
+import { clear, el, formatBytes, formatDuration, sheet, viewLayout } from "../lib/dom";
 import type { ReplayState, Session } from "../lib/messages";
 import { store } from "../lib/store";
 import type { View } from "./view";
@@ -176,6 +176,83 @@ export function sessionsView(): View {
     );
   }
 
+  /**
+   * Replay, and everything else behind an overflow.
+   *
+   * Four buttons in a row is fine against a desktop's session list and impossible at 360 px,
+   * where they wrap into a two-by-two block with Delete directly under Replay. The three less
+   * common actions move into a sheet on a phone; the desktop shows the same buttons inline and
+   * hides the overflow. They are one set of elements either way — the sheet borrows them and
+   * hands them back — so there is no second copy of a delete handler to keep in step.
+   */
+  function sessionActions(session: Session): HTMLElement {
+    const rest = el(
+      "div",
+      { class: "session-extra" },
+      el(
+        "button",
+        {
+          class: "button",
+          disabled: session.active,
+          title: "Replay as fast as the machine allows — an overnight run in a minute",
+          onclick: () => void post(`/api/sessions/${session.id}/replay`, { speed: 0 }),
+        },
+        "Fast",
+      ),
+      el(
+        "button",
+        {
+          class: "button",
+          title: "Rebuild frame counts by walking the file — use after an unclean shutdown",
+          onclick: () =>
+            void post(`/api/sessions/${session.id}/rescan`).then(() => store.refreshSessions()),
+        },
+        "Rescan",
+      ),
+      el(
+        "button",
+        {
+          class: "button button-danger",
+          disabled: session.active,
+          onclick: () => {
+            if (!confirm(`Delete ${session.label}? The recording file goes too.`)) return;
+            void fetch(`/api/sessions/${session.id}`, { method: "DELETE" }).then(() =>
+              store.refreshSessions(),
+            );
+          },
+        },
+        "Delete",
+      ),
+    );
+
+    const overflow = sheet({ title: session.label, body: rest });
+
+    return el(
+      "div",
+      { class: "session-actions" },
+      el(
+        "button",
+        {
+          class: "button",
+          disabled: session.active,
+          onclick: () => void post(`/api/sessions/${session.id}/replay`, { speed: 1 }),
+        },
+        "Replay",
+      ),
+      rest,
+      el(
+        "button",
+        {
+          class: "button button-icon session-overflow",
+          type: "button",
+          "aria-label": `More actions for ${session.label}`,
+          onclick: () => overflow.open(),
+        },
+        "···",
+      ),
+    );
+  }
+
   function renderSessions(sessions: Session[]) {
     clear(list);
 
@@ -215,55 +292,7 @@ export function sessionsView(): View {
               session.notes ? el("div", { class: "session-notes" }, session.notes) : null,
             ),
           ),
-          el(
-            "div",
-            { class: "button-row" },
-            el(
-              "button",
-              {
-                class: "button",
-                disabled: session.active,
-                onclick: () => void post(`/api/sessions/${session.id}/replay`, { speed: 1 }),
-              },
-              "Replay",
-            ),
-            el(
-              "button",
-              {
-                class: "button",
-                disabled: session.active,
-                title: "Replay as fast as the machine allows — an overnight run in a minute",
-                onclick: () => void post(`/api/sessions/${session.id}/replay`, { speed: 0 }),
-              },
-              "Fast",
-            ),
-            el(
-              "button",
-              {
-                class: "button",
-                title: "Rebuild frame counts by walking the file — use after an unclean shutdown",
-                onclick: () =>
-                  void post(`/api/sessions/${session.id}/rescan`).then(() =>
-                    store.refreshSessions(),
-                  ),
-              },
-              "Rescan",
-            ),
-            el(
-              "button",
-              {
-                class: "button button-danger",
-                disabled: session.active,
-                onclick: () => {
-                  if (!confirm(`Delete ${session.label}? The recording file goes too.`)) return;
-                  void fetch(`/api/sessions/${session.id}`, { method: "DELETE" }).then(() =>
-                    store.refreshSessions(),
-                  );
-                },
-              },
-              "Delete",
-            ),
-          ),
+          sessionActions(session),
         ),
       );
     }

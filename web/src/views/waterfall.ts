@@ -23,7 +23,7 @@
 // OffscreenCanvas. Steps 1-3 remove essentially all of the pain; that one is the follow-up.
 
 import { colormap, colormapGradient, type ColormapName } from "../lib/colormap";
-import { el, fitCanvas, select, slider, toggle, viewLayout } from "../lib/dom";
+import { el, fitCanvas, hintBlock, select, slider, toggle, viewLayout } from "../lib/dom";
 import type { FrameBatch, Metrics } from "../lib/messages";
 import { store } from "../lib/store";
 import type { View } from "./view";
@@ -181,19 +181,35 @@ export function waterfallView(): View {
     if (nSub === 0) return;
 
     const ratio = window.devicePixelRatio || 1;
-    overlayContext.font = `${11 * ratio}px ui-monospace, monospace`;
+    overlayContext.font = `${(height < 320 * ratio ? 10 : 11) * ratio}px ui-monospace, monospace`;
     overlayContext.textBaseline = "middle";
 
-    // Subcarrier axis. Ticks every 8 indices is dense enough to locate a feature and sparse
-    // enough to stay readable at any panel height.
+    // Subcarrier axis. Every 8 indices is dense enough to locate a feature and sparse enough to
+    // stay readable — on a desktop panel. On a phone, or with a Pi's 256 subcarriers, that same
+    // spacing stacks labels on top of one another, so the step is whatever keeps roughly 22 px
+    // between gridlines instead.
+    let step = 8;
+    while (step < nSub && (step / nSub) * height < 22 * ratio) step *= 2;
+
     overlayContext.strokeStyle = "rgba(255,255,255,0.08)";
-    overlayContext.fillStyle = "rgba(255,255,255,0.45)";
-    for (let sub = 0; sub < nSub; sub += 8) {
+    for (let sub = 0; sub < nSub; sub += step) {
       const y = height - 1 - (sub / nSub) * height;
       overlayContext.beginPath();
       overlayContext.moveTo(0, y);
       overlayContext.lineTo(width, y);
       overlayContext.stroke();
+    }
+
+    // Labels second, and haloed. They sit directly on the data — there is no gutter to put them
+    // in without spending width the waterfall wants for time — and pale grey on a bright viridis
+    // green is invisible exactly when the plot is busiest.
+    overlayContext.lineWidth = 3 * ratio;
+    overlayContext.lineJoin = "round";
+    overlayContext.strokeStyle = "rgba(0,0,0,0.6)";
+    overlayContext.fillStyle = "rgba(255,255,255,0.85)";
+    for (let sub = 0; sub < nSub; sub += step) {
+      const y = height - 1 - (sub / nSub) * height;
+      overlayContext.strokeText(String(sub), 4 * ratio, y - 8 * ratio);
       overlayContext.fillText(String(sub), 4 * ratio, y - 8 * ratio);
     }
 
@@ -257,8 +273,8 @@ export function waterfallView(): View {
     status.textContent =
       nSub === 0
         ? "waiting for frames"
-        : `${nSub} subcarriers · ${store.rate.value} fps · ` +
-          (lastAgcAt === 0 ? "no AGC steps yet" : `last AGC step ${agcAge.toFixed(0)}s ago`);
+        : `${nSub} sub · ${store.rate.value} fps · ` +
+          (lastAgcAt === 0 ? "no AGC yet" : `AGC ${agcAge.toFixed(0)}s ago`);
 
     animation = requestAnimationFrame(tick);
   }
@@ -319,42 +335,41 @@ export function waterfallView(): View {
 
   const root = viewLayout({
     className: "view-waterfall",
+    controlsTitle: "Display",
     main: [
       el(
-      "div",
-      { class: "panel panel-grow" },
-      el(
         "div",
-        { class: "panel-head" },
-        el("h2", {}, "Waterfall"),
-        el("div", { class: "panel-note" }, status),
-      ),
-      el(
-        "div",
-        { class: "waterfall-frame" },
-        el("div", { class: "waterfall-canvases" }, canvas, overlay),
+        { class: "panel panel-grow" },
         el(
           "div",
-          { class: "legend" },
-          el("span", {}, "high"),
-          legend,
-          el("span", {}, "low"),
+          { class: "panel-head" },
+          el("h2", {}, "Waterfall"),
+          el("div", { class: "spacer" }),
+          el("div", { class: "panel-note" }, status),
+        ),
+        el(
+          "div",
+          { class: "waterfall-frame" },
+          el("div", { class: "waterfall-canvases" }, canvas, overlay),
+          // Column on the desktop, a strip under the plot on a phone — where a 34 px-wide bar
+          // would cost a tenth of the width the waterfall spends on time.
+          el("div", { class: "legend" }, el("span", {}, "high"), legend, el("span", {}, "low")),
         ),
       ),
-    )],
-    side: [el(
-      "div",
-      { class: "panel" },
-      el("div", { class: "panel-head" }, el("h2", {}, "Display")),
-      controls,
+    ],
+    side: [
       el(
-        "p",
-        { class: "hint" },
-        "Wave an arm between the nodes. If nothing moves here, stop and fix the capture chain — " +
-          "no downstream processing rescues a bad signal, and you want to know that in an " +
-          "evening rather than a month.",
+        "div",
+        { class: "panel" },
+        el("div", { class: "panel-head" }, el("h2", {}, "Display")),
+        controls,
+        hintBlock(
+          "Wave an arm between the nodes. If nothing moves here, stop and fix the capture chain — " +
+            "no downstream processing rescues a bad signal, and you want to know that in an " +
+            "evening rather than a month.",
+        ),
       ),
-    )],
+    ],
   });
 
   let unsubscribeFrames: (() => void) | null = null;

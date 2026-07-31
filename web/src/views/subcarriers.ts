@@ -185,17 +185,16 @@ export function subcarrierView(): View {
   );
 
   const root = viewLayout({
+    controlsTitle: "Traces",
     main: [
       el(
         "div",
         { class: "panel panel-grow" },
-        el(
-          "div",
-          { class: "panel-head" },
-          el("h2", {}, "Subcarrier lines"),
-          el("div", { class: "panel-note" }, legend),
-        ),
+        el("div", { class: "panel-head" }, el("h2", {}, "Subcarrier lines")),
         el("div", { class: "plot-frame" }, canvas),
+        // Below the plot rather than beside the title: six wrapping legend entries in a panel
+        // head push the title onto its own line on a phone.
+        legend,
       ),
     ],
     side: [
