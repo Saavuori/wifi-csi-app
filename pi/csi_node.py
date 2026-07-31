@@ -82,6 +82,12 @@ NEXMON_UDP_PORT = 5500
 SO_TIMESTAMPNS = getattr(socket, "SO_TIMESTAMPNS", 35)
 SCM_TIMESTAMPNS = getattr(socket, "SCM_TIMESTAMPNS", 35)
 
+# `struct timespec` as SCM_TIMESTAMPNS delivers it, keyed by the length of the control message:
+# two 64-bit words on a 64-bit userspace, two 32-bit words on a 32-bit one. See `timestamp_us`.
+# "=" is native byte order — the message comes from this machine's own kernel — with explicit
+# widths, so the decode follows the message rather than however this interpreter was built.
+_TIMESPEC_FORMATS = {16: "=qq", 8: "=ii"}
+
 # Broadcom chanspec, d11ac encoding.
 CHANSPEC_CHAN_MASK = 0x00FF
 CHANSPEC_BW_MASK = 0x3800
@@ -344,13 +350,32 @@ def udp_payload(packet: bytes, port: int) -> bytes | None:
 
 
 def timestamp_us(ancdata) -> int | None:
-    """Microseconds from an SCM_TIMESTAMPNS control message, or None if absent."""
+    """Microseconds from an SCM_TIMESTAMPNS control message, or None if absent.
+
+    The message carries a `struct timespec`, and its width follows userspace, not the kernel:
+    two 64-bit words on a 64-bit build, two 32-bit words on a 32-bit one. SO_TIMESTAMPNS is the
+    legacy option, so on 32-bit ARM the kernel deliberately hands back the old 8-byte
+    `timespec32` — and 32-bit Raspberry Pi OS is the default image for every Pi that is not a 4
+    or a 5, which is most of the ones a nexmon_csi build ends up on.
+
+    Demanding 16 bytes there means every frame falls through to the caller's wall-clock
+    fallback. That does not break anything visibly: the timestamps are still monotonic and still
+    roughly right, but they are stamped in this process instead of in the driver, so they now
+    carry its scheduling jitter — and the breathing estimator resamples on exactly these
+    timestamps and cannot repair one that is wrong. A degradation you cannot see is the worst
+    shape for this particular field to fail in, which is why the caller warns about the
+    fallback at all.
+
+    So take the width from the message rather than assuming it. Both layouts are a pair of
+    signed native words; only the width of the word differs, and the message length says which.
+    """
     for level, ctype, data in ancdata:
         if level != socket.SOL_SOCKET or ctype != SCM_TIMESTAMPNS:
             continue
-        if len(data) < 16:
+        fmt = _TIMESPEC_FORMATS.get(len(data))
+        if fmt is None:
             return None
-        sec, nsec = struct.unpack("qq", data[:16])
+        sec, nsec = struct.unpack(fmt, data)
         return sec * 1_000_000 + nsec // 1000
     return None
 
@@ -562,6 +587,7 @@ def run(args: argparse.Namespace) -> int:
     )
 
     bad = 0
+    unstamped = 0
     reported = time.monotonic()
     try:
         while True:
@@ -584,8 +610,9 @@ def run(args: argparse.Namespace) -> int:
                 # No kernel timestamp: fall back, but say so, because this silently degrades
                 # the breathing estimate rather than breaking anything visibly.
                 capture_us = time.clock_gettime_ns(time.CLOCK_REALTIME) // 1000
-                if node.frames == 0:
+                if unstamped == 0:
                     log.warning("no SO_TIMESTAMPNS; timestamps will carry scheduling jitter")
+                unstamped += 1
 
             datagram = node.on_packet(pkt, capture_us)
             if datagram is not None:
@@ -595,8 +622,8 @@ def run(args: argparse.Namespace) -> int:
                 rate = node.frames / max(now - reported, 1e-9)
                 log.info(
                     "%d frames (%.1f Hz), %d subcarriers, rssi %d dBm, %d link changes, "
-                    "%d malformed",
-                    node.frames, rate, pkt.n_sub, node.rssi, node.link_changes, bad,
+                    "%d malformed, %d unstamped",
+                    node.frames, rate, pkt.n_sub, node.rssi, node.link_changes, bad, unstamped,
                 )
                 node.frames = 0
                 reported = now
