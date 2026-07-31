@@ -674,3 +674,70 @@ async def test_a_slow_replay_stop_still_closes_the_recording(settings):
     assert hub.replayer is None
     assert live.ended_at is not None, "the recording must be closed even if the replay stalls"
     assert live.as_dict()["active"] is False
+async def test_toggling_the_mask_clears_the_history_instead_of_poisoning_it(settings):
+    """Unticking "drop pilots" in the UI must not take the analysis down with it.
+
+    The rows already in the ring were written under the old mask, so they hold NaN exactly where
+    the new mask claims there is signal. Left in place they are selected *because* the mask says
+    they are good, and the metrics pass raises on them for as long as they stay in the ring.
+    """
+    hub = Hub(settings)
+    scene = Scene(SceneConfig(breathing_bpm=15.0, rate_hz=80.0))
+
+    def feed(seconds: float) -> None:
+        for _ in range(int(seconds * 80)):
+            frame = scene.next_frame()
+            if frame is not None:
+                hub.handle_datagram(encode_frame(frame), 1000.0)
+
+    feed(30.0)
+    state = hub.nodes[1]
+    assert len(state.ring) > 2000
+
+    hub.update_config({"preprocess": {"drop_pilots": False}})
+    feed(1.0)
+
+    assert len(state.ring) == 80, "history from before the change must be dropped, not kept"
+    window = state.ring.seconds(30.0)
+    valid = window.amp[:, window.mask]
+    assert np.isfinite(valid).all(), "no NaN at a subcarrier the mask calls valid"
+
+    feed(29.0)
+    metrics = hub.compute_metrics(state, hub.history_for(state))
+    assert metrics is not None
+    assert metrics["breathing"]["bpm"] == pytest.approx(15.0, abs=2.0)
+
+
+async def test_newly_enabled_subcarriers_are_used_immediately(settings):
+    """Turning pilots back on must make them available now, not in two minutes.
+
+    The magnitude gate rejects a subcarrier that is incomplete over the window, which is what
+    keeps the stale rows from reaching `welch`. But that leaves the newly-enabled carriers gated
+    out for as long as any pre-change row is still in the ring — the config echo says
+    `drop_pilots: false`, the mask says they are valid, and nothing uses them. Silence, for up to
+    CSI_HISTORY_S.
+    """
+    from csi.dsp.selection import magnitude_gate
+
+    hub = Hub(settings)
+    scene = Scene(SceneConfig(breathing_bpm=15.0, rate_hz=80.0))
+
+    def feed(seconds: float) -> None:
+        for _ in range(int(seconds * 80)):
+            frame = scene.next_frame()
+            if frame is not None:
+                hub.handle_datagram(encode_frame(frame), 1000.0)
+
+    feed(30.0)
+    hub.update_config({"preprocess": {"drop_pilots": False}})
+    feed(2.0)
+
+    window = hub.nodes[1].ring.seconds(settings.history_s)
+    pilots = [7, 21, 43, 57]  # HT20, per subcarriers.LAYOUTS
+    assert all(window.mask[p] for p in pilots), "the mask now calls the pilots valid"
+
+    # A gate quantile of 0 keeps everything that clears the *completeness* test, so what this
+    # measures is eligibility rather than merit — a carrier missing here was excluded because
+    # the ring still holds rows from before the change, not because it is in a fade.
+    kept, _ = magnitude_gate(window, 0.0)
+    assert set(pilots) <= set(kept.tolist()), "so the analysis must be able to use them"
