@@ -8,7 +8,14 @@
 # breathing — does something visible on a Pi with no ESP32 boards attached. Pass --no-demo
 # when you have real hardware to point at it.
 #
+# On a Pi whose radio nexmon_csi can patch (3B+, 4, 5, CM4) it offers to make this same Pi a
+# real CSI sensor as well as the server — see pi/README.md. That part takes a while and, on a
+# Pi 5, one reboot, so it asks first unless you pass --node or --no-node.
+#
 #     --no-demo          do not start the synthetic node
+#     --node             also set this Pi up as a CSI sensor (nexmon_csi), no prompt
+#     --no-node          do not offer to, even on supported hardware
+#     --node-id N        node id for this Pi, 1..254 (default 20)
 #     --data-dir PATH    where recordings go (default ~/csi-data)
 #     --http-port N      port for the web app (default 8080)
 #     --udp-port N       port the nodes send to (default 5566)
@@ -34,6 +41,10 @@ BUILD=0
 UNINSTALL=0
 ASSUME_YES=0
 DOCKER="docker"
+# auto: offer it if the radio supports it. --node and --no-node decide it outright.
+NODE="auto"
+NODE_ID="${CSI_NODE_ID:-20}"
+SRC_DIR=""
 
 # 4 MB, matching the receive buffer the ingest socket asks for. See the note in ensure_sysctl.
 WANT_RMEM=8388608
@@ -55,6 +66,9 @@ usage() {
 Set up WiFi CSI sensing on a Raspberry Pi.
 
   --no-demo          do not start the synthetic node
+  --node             also set this Pi up as a CSI sensor (nexmon_csi), no prompt
+  --no-node          do not offer to, even on supported hardware
+  --node-id N        node id for this Pi, 1..254 (default 20)
   --data-dir PATH    where recordings go (default ~/csi-data)
   --http-port N      port for the web app (default 8080)
   --udp-port N       port the nodes send to (default 5566)
@@ -85,6 +99,9 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --no-demo)   DEMO=0 ;;
         --demo)      DEMO=1 ;;
+        --node)      NODE=1 ;;
+        --no-node)   NODE=0 ;;
+        --node-id)   NODE_ID="${2:?--node-id needs a number}"; shift ;;
         --build)     BUILD=1 ;;
         --uninstall) UNINSTALL=1 ;;
         --yes|-y)    ASSUME_YES=1 ;;
@@ -192,17 +209,32 @@ check_storage() {
 # Image
 # ---------------------------------------------------------------------------------------
 
-build_image() {
-    step "Building the image from source"
-    local src="$PWD"
-    if [ ! -f "$src/deploy/Containerfile" ]; then
-        src="${TMPDIR:-/tmp}/wifi-csi-app"
-        command -v git > /dev/null 2>&1 || die "git is needed to build from source"
-        rm -rf "$src"
-        git clone --depth 1 "$REPO_URL" "$src"
+# Puts a checkout of this repo in SRC_DIR, cloning one if we are not already in it. Both
+# building the image and installing the node need the source; piped from curl there is none.
+# Sets a global rather than echoing the path, so that it can log as it goes and so the clone
+# is genuinely done once — a subshell's assignment would not survive to the second caller.
+ensure_source() {
+    [ -n "$SRC_DIR" ] && return 0
+
+    if [ -f "$PWD/deploy/Containerfile" ] && [ -f "$PWD/pi/csi_node.py" ]; then
+        SRC_DIR="$PWD"
+        return 0
     fi
+
+    step "Fetching the source"
+    SRC_DIR="${TMPDIR:-/tmp}/wifi-csi-app"
+    command -v git > /dev/null 2>&1 || die "git is needed to fetch the source"
+    rm -rf "$SRC_DIR"
+    git clone --depth 1 "$REPO_URL" "$SRC_DIR" > /dev/null 2>&1 \
+        || die "could not clone $REPO_URL"
+    ok "cloned into $SRC_DIR"
+}
+
+build_image() {
+    ensure_source
+    step "Building the image from source"
     say "  this takes a few minutes on a Pi"
-    $DOCKER build -f "$src/deploy/Containerfile" -t "$IMAGE" "$src"
+    $DOCKER build -f "$SRC_DIR/deploy/Containerfile" -t "$IMAGE" "$SRC_DIR"
     ok "built $IMAGE"
 }
 
@@ -270,6 +302,59 @@ start_synth() {
     ok "two synthetic nodes, 14 breaths/min, alternating empty and occupied"
 }
 
+# ---------------------------------------------------------------------------------------
+# This Pi as a sensor
+# ---------------------------------------------------------------------------------------
+
+# nexmon_csi patches the BCM43455, which is the radio on the 3B+, 4, 5 and CM4. Everything
+# else Raspberry Pi has shipped carries a chip it cannot patch, so there is no point offering.
+csi_capable_radio() {
+    local model
+    model="$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || echo "")"
+    case "$model" in
+        *"Raspberry Pi 5"*|*"Raspberry Pi 4"*|*"Raspberry Pi 3 Model B Plus"*|*"Compute Module 4"*)
+            return 0 ;;
+        *)  return 1 ;;
+    esac
+}
+
+maybe_install_node() {
+    [ "$NODE" = 0 ] && return 0
+
+    if ! csi_capable_radio; then
+        if [ "$NODE" = 1 ]; then
+            warn "this board's Wi-Fi chip is not one nexmon_csi supports; skipping --node"
+        fi
+        return 0
+    fi
+
+    if [ "$NODE" = auto ]; then
+        say ""
+        step "This Pi can be a sensor as well as the server"
+        say "  Its radio is one nexmon_csi can patch, so it can measure CSI itself with no"
+        say "  ESP32 boards involved: 256 subcarriers at 80 MHz against your access point."
+        say ""
+        say "  ${dim}It patches the Wi-Fi firmware, takes 20-40 minutes to build, and on a"
+        say "  Pi 5 needs one reboot part way through. Reversible with --uninstall.${reset}"
+        if ! ask "Set this Pi up as a CSI sensor too?" n; then
+            say "  ${dim}Skipped. Run install.sh --node later to change your mind.${reset}"
+            return 0
+        fi
+    fi
+
+    ensure_source
+    [ -f "$SRC_DIR/pi/install-node.sh" ] \
+        || { warn "pi/install-node.sh is missing; skipping"; return 0; }
+
+    local args=(--server 127.0.0.1 --port "$UDP_PORT" --node-id "$NODE_ID")
+    [ "$ASSUME_YES" = 1 ] && args+=(--yes)
+
+    # The node talks to the server over the loopback: both are on this Pi, and the container
+    # publishes the UDP port on the host.
+    $SUDO bash "$SRC_DIR/pi/install-node.sh" "${args[@]}" \
+        || warn "the node install did not finish; see the output above"
+}
+
 wait_healthy() {
     step "Waiting for the server"
     if ! command -v curl > /dev/null 2>&1; then
@@ -294,6 +379,19 @@ uninstall() {
     remove_container "$CONTAINER"
     $DOCKER network rm "$NETWORK" > /dev/null 2>&1 || true
     ok "containers and network removed"
+
+    if [ -f /etc/systemd/system/csi-node.service ]; then
+        if [ -x /opt/csi-node/uninstall.sh ]; then
+            $SUDO /opt/csi-node/uninstall.sh
+        else
+            $SUDO systemctl disable --now csi-node > /dev/null 2>&1 || true
+            $SUDO rm -f /etc/systemd/system/csi-node.service /etc/default/csi-node
+            $SUDO systemctl daemon-reload
+            # Installed through update-alternatives, so the stock firmware is still on disk.
+            $SUDO update-alternatives --auto brcmfmac43455-sdio.bin > /dev/null 2>&1 || true
+            ok "csi-node service removed; reboot to load the stock Wi-Fi firmware"
+        fi
+    fi
     say ""
     say "Recordings were left alone. Delete them with:"
     say "  rm -rf $DATA_DIR"
@@ -307,6 +405,11 @@ summary() {
     say "  http://localhost:${HTTP_PORT}"
     [ -n "$ip" ] && say "  http://${ip}:${HTTP_PORT}   ${dim}(from another machine on this network)${reset}"
     say ""
+    if systemctl is-active --quiet csi-node 2>/dev/null; then
+        say "${bold}This Pi is also sensing.${reset} It reports as node $NODE_ID."
+        say "  journalctl -u csi-node -f     ${dim}(rate, subcarriers, RSSI every 10 s)${reset}"
+        say ""
+    fi
     if [ "$DEMO" = 1 ]; then
         say "The data is synthetic. Give the presence detector about a minute to finish"
         say "calibrating, then it tracks the scenario and the breathing view settles near 14."
@@ -344,6 +447,8 @@ main() {
     start_server
     if [ "$DEMO" = 1 ]; then start_synth; fi
     wait_healthy || true
+    # After the server, so that the node has somewhere to send its first frame.
+    maybe_install_node
     summary
 }
 

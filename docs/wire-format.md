@@ -6,16 +6,19 @@ Two independent binary formats, plus one file container. All little-endian.
 - **Downlink** — server → browser, WebSocket binary frames.
 - **Recording** — length-prefixed uplink datagrams on disk.
 
-A single canonical definition lives in three places that must stay in sync:
+A single canonical definition lives in four places that must stay in sync:
 
-| Language | File |
-|---|---|
-| C (firmware) | `firmware/main/csi_wire.h` |
-| Python (server) | `server/csi/protocol.py` |
-| TypeScript (browser) | `web/src/lib/protocol.ts` |
+| Language | File | Pinned by |
+|---|---|---|
+| C (firmware) | `firmware/main/csi_wire.h` | `firmware/scripts/run_host_tests.sh` |
+| Python (server) | `server/csi/protocol.py` | `server/tests/test_protocol.py` |
+| TypeScript (browser) | `web/src/lib/protocol.ts` | `server/tests/test_protocol.py` |
+| Python (Pi node) | `pi/csi_node.py` | `pi/tests/test_csi_node.py` |
 
 `server/tests/test_protocol.py` pins the byte layout so drift is caught by CI rather than by a
-silent parse failure at 100 Hz.
+silent parse failure at 100 Hz. The Pi node's copy is pinned differently and more strongly: its
+tests parse the datagrams it produces with `server/csi/protocol.py` itself, so the two cannot
+disagree about the layout without a test failing.
 
 ---
 
@@ -40,8 +43,29 @@ Header is 22 bytes, `#pragma pack(1)`-equivalent — no padding anywhere. A HT20
 64 subcarriers is `22 + 128 = 150` bytes, so at 100 Hz a node emits ~15 KB/s of payload.
 
 `n_sub` is explicit and per-frame. Nothing downstream may assume 64. HT20 gives 64, HT40 gives
-128, a future Nexmon node will send 256. The subcarrier layout tables in
-`server/csi/dsp/subcarriers.py` are keyed on `n_sub`.
+128, and a Raspberry Pi running Nexmon on an 80 MHz channel sends 256. The subcarrier layout
+tables in `server/csi/dsp/subcarriers.py` are keyed on `n_sub`.
+
+### Two kinds of producer
+
+The header is written by an ESP32 (`firmware/`) or by a Pi running Nexmon (`pi/`). The fields
+mean the same thing either way, but three of them are *synthesized* on the Pi rather than read
+from the radio, and it is worth knowing which:
+
+| Field | ESP32 | Pi |
+|---|---|---|
+| `timestamp` | `esp_timer_get_time()`, in the CSI callback | kernel receive timestamp (`SO_TIMESTAMPNS`) |
+| `seq` | incremented per CSI callback | minted per forwarded frame; the 802.11 sequence number is *not* used |
+| `rssi` | `wifi_pkt_rx_ctrl_t` | the driver's estimate from `/proc/net/wireless`, sampled at 1 Hz |
+| `data` | `memcpy` of the driver's int8 buffer | int16 scaled per frame into int8 |
+
+The Pi's `seq` is deliberately not the one Nexmon reports: that is the transmitter's 802.11
+sequence number, 12 bits wide, and it wraps every 4096 frames. Forwarded as-is, a wrap reads
+as a reboot roughly every 41 seconds at 100 Hz.
+
+There is no `link_epoch` in v1, so the Pi signals a roam or an AP channel switch by restarting
+both its clock and its counter — which is exactly how a node reboot presents, and the server
+already answers a reboot by dropping the node's history. See `pi/README.md`.
 
 ### Why (imag, real) and not (real, imag)
 

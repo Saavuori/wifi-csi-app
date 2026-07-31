@@ -1,23 +1,27 @@
 # WiFi CSI sensing
 
-Capture Channel State Information from ESP32 nodes, stream it to a server, visualize and analyze
-it in a web app.
+Capture Channel State Information from ESP32 boards or a Raspberry Pi, stream it to a server,
+visualize and analyze it in a web app.
 
 **Design principle: the pipeline is source-agnostic.** A frame is `(timestamp_us, node_id,
 complex[N])` with `N` variable and explicit per frame. An ESP32 in HT20, the same board in HT40,
-a future Raspberry Pi running Nexmon at 256 subcarriers, and a replayed public dataset are all
-just producers into that format. Nothing downstream knows or cares which it is looking at.
+a Raspberry Pi running Nexmon at 256 subcarriers, and a replayed public dataset are all just
+producers into that format. Nothing downstream knows or cares which it is looking at.
 
 ```
-  ESP32-S3 (TX)  ──100 Hz──►  air  ──►  ESP32-S3 (RX)  ──UDP──►  server  ──WebSocket──►  browser
-                                          promiscuous              ingest                 waterfall
-                                          CSI callback             record  ◄──replay──►   motion
-                                                                   analyse                breathing
+  ESP32-S3 (TX)  ──100 Hz──►  air  ──►  ESP32-S3 (RX)  ──┐
+                                          promiscuous     │
+                                          CSI callback    │   UDP     server  ──WebSocket──►  browser
+                                                          ├─────────► ingest                  waterfall
+  access point  ──replies──►  air  ──►  Raspberry Pi   ───┘           record  ◄──replay──►    motion
+                                          nexmon_csi                  analyse                 breathing
+                                          80 MHz, 256 sub
 ```
 
 | Directory | What it is |
 |---|---|
-| `firmware/` | ESP-IDF project for the nodes. One image, two roles. |
+| `firmware/` | ESP-IDF project for the ESP32 nodes. One image, two roles. |
+| `pi/` | Raspberry Pi node: nexmon_csi capture, forwarded in the same format. |
 | `server/` | Python: UDP ingest, recorder, replayer, DSP, HTTP + WebSocket. |
 | `web/` | TypeScript + canvas front end. No framework. |
 | `docs/` | Wire formats. |
@@ -36,6 +40,12 @@ ingest, starts the server, and starts a synthetic node alongside it — so the w
 and the breathing view converges on a known answer without any hardware. Then open
 `http://<pi>:8080`. Pass `--no-demo` when you have boards to point at it instead, and
 `--uninstall` to remove it. Details and the compose file are in [`deploy/README.md`](deploy/README.md).
+
+On a Pi 3B+, 4, 5 or CM4 it also offers to make that same Pi a **real sensor**, with no ESP32
+boards involved: it patches the Wi-Fi firmware with nexmon_csi and measures 256 subcarriers at
+80 MHz against your access point. Say yes, or pass `--node` to skip the prompt. Budget 20-40
+minutes for the firmware build, plus one reboot on a Pi 5. See [`pi/README.md`](pi/README.md)
+for what it does and does not measure.
 
 ## Quick start, without hardware
 
@@ -121,6 +131,7 @@ Numbered as in the build plan.
 | Phase | Where | State |
 |---|---|---|
 | 1 — Firmware | `firmware/` | Implemented; the ring and wire layout have host tests, and the radio path has now run on boards at 94.7 Hz with zero loss |
+| 1b — Raspberry Pi node | `pi/` | Implemented and tested against synthetic nexmon packets. **Not yet run on a Pi** — the translation is covered, the firmware build and the live capture are not |
 | 2 — Ingest + recorder | `server/csi/{ingest,recorder,replay,sessions}.py` | Implemented and tested |
 | 3 — Waterfall | `web/src/views/waterfall.ts` | Implemented |
 | 4 — Motion + presence | `server/csi/dsp/{presence,selection}.py` | Implemented and tested |
@@ -184,10 +195,13 @@ pipeline rather than by reading it:
 ## Tests
 
 ```sh
-.venv/bin/python -m pytest server/tests      # 115 tests
+.venv/bin/python -m pytest server/tests      # 122 tests
+.venv/bin/python -m pytest pi/tests          # 43 tests, no Pi needed
 firmware/scripts/run_host_tests.sh           # ring buffer + wire layout, no hardware needed
 cd web && npm run build                      # typecheck + bundle
 ```
+
+`check.sh` runs all four.
 
 All three run in CI on every push, and the container image is built for amd64 and arm64 only
 after they pass — see [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
@@ -219,10 +233,15 @@ Two separate ESP32s do **not** give CSI-ratio benefits. That trick cancels carri
 offset because both antennas share one oscillator; separate boards have independent clocks.
 This is an amplitude-only system throughout — there is no phase unwrapping anywhere, on purpose.
 
-**Deferred upgrades:** HT40 for 128 subcarriers, a plane reflector behind the PIFA, a Raspberry
-Pi + Nexmon node for 256 subcarriers at 80 MHz. All three drop into the same ingest format
-without touching the web app — `n_sub` is per-frame and the subcarrier layout tables are keyed
-on it.
+The Raspberry Pi node reaches 256 subcarriers at 80 MHz, which is four times the frequency
+resolution of an ESP32 in HT20, but it pays for it: no radio-level timestamp, no per-frame
+RSSI, and its amplitude is scaled per frame so the AGC step detector cannot fire on it.
+[`pi/README.md`](pi/README.md) is explicit about which numbers are measured and which are
+synthesized.
+
+**Deferred upgrades:** HT40 on the ESP32 for 128 subcarriers, and a plane reflector behind the
+PIFA. Both drop into the same ingest format without touching the web app — `n_sub` is per-frame
+and the subcarrier layout tables are keyed on it.
 
 ## Reference material
 
