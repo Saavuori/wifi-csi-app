@@ -9,11 +9,22 @@ CONFIG_IDF_TARGET="esp32s3"
 # the actual sendto work lands right back on the core we were trying to keep clear, and the
 # contention is still there — just harder to find. Both are required.
 CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU1=y
-CONFIG_ESP_WIFI_TASK_CORE_ID_0=y
+# The symbol is ESP_WIFI_TASK_PINNED_TO_CORE_0, not ESP_WIFI_TASK_CORE_ID_0. Kconfig does not
+# fail on an unknown symbol in a defaults file — it prints a warning and carries on — so the
+# wrong name here was silently doing nothing. Core 0 happens to be the IDF default, so the
+# behaviour was right by accident; the line is what was broken, not the pinning.
+CONFIG_ESP_WIFI_TASK_PINNED_TO_CORE_0=y
 
 # A 1 ms tick, so an 80-100 Hz transmit period is a whole number of ticks. At the 10 ms default
 # the period rounds and the transmit rate is quietly wrong.
 CONFIG_FREERTOS_HZ=1000
+
+# app_main does the whole of startup on this stack: settings, WiFi init, the boot scan, and the
+# association. The default 3584 bytes fits that with very little to spare — the boot scan alone
+# takes over a kilobyte for its results array — and it overflows outright once the setup portal's
+# validation is on the same path. Raised rather than trimmed: startup is not where to be clever
+# about a few kilobytes of RAM that are handed back the moment app_main returns.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 
 # --- WiFi buffers ---------------------------------------------------------------------------
 # CSI arrives with every received frame; the defaults are sized for a device that mostly idles.
@@ -43,4 +54,9 @@ CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
 # Power save off. With it on the radio sleeps between beacons and the steady stream becomes
 # bursts, which is useless for frequency analysis regardless of timestamp quality.
-CONFIG_ESP_WIFI_PS_NONE=y
+#
+# There is no build-time symbol for this in IDF 5.x — CONFIG_ESP_WIFI_PS_NONE does not exist,
+# and a defaults file only warns about a name it does not recognise. The setting that actually
+# takes effect is the esp_wifi_set_ps(WIFI_PS_NONE) call in csi_wifi.c, which the boot log
+# confirms with "wifi:Set ps type: 0". Kept as a comment rather than deleted because the
+# absence of any power-save line here otherwise reads like an oversight.

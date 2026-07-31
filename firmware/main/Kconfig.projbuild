@@ -32,6 +32,9 @@ menu "CSI node"
             the server will interleave two rooms into a single history.
 
     menu "WiFi"
+        comment "These are starting values. Once anything has been saved from the setup"
+        comment "page, the stored settings win and these are only used again after an erase."
+
         config CSI_WIFI_SSID
             string "SSID"
             default "csi-net"
@@ -192,6 +195,65 @@ menu "CSI node"
                 Target ~80-100 Hz. That is far above Nyquist for the ~2 Hz cardiac band and
                 leaves headroom for decimation. Needs CONFIG_FREERTOS_HZ high enough that the
                 period is a whole number of ticks — sdkconfig.defaults sets 1000.
+    endmenu
+
+    menu "Setup portal"
+        comment "A SoftAP and a web page for setting the SSID, the BSSID lock and the server"
+        comment "address without a rebuild. Runs instead of capture, never alongside it."
+
+        config CSI_PORTAL_IN_STATION
+            bool "Also serve the setup page while capturing"
+            default y
+            help
+                Keeps the same page reachable at the node's own address on your network, so
+                changing the access point does not need a button press or a cable.
+
+                Idle it is one task blocked on a listening socket and about 12 KB of heap, and it
+                is in neither the CSI callback nor the packer. It is pinned to core 1 below the
+                sender and the prober, so a request that arrives mid-capture waits for them
+                rather than the other way round. Turn it off if you want the capture path to have
+                nothing on it at all, and use the button instead.
+
+                Note that it has no authentication: anyone on your network can read the node's
+                settings, minus the WiFi password, and change them.
+
+        config CSI_PORTAL_AP_PREFIX
+            string "Setup network name prefix"
+            default "csi-setup"
+            help
+                The last three octets of the board's MAC are appended, so two nodes being set up
+                in the same room are distinguishable without a serial console.
+
+        config CSI_PORTAL_AP_PASSWORD
+            string "Setup network password"
+            default ""
+            help
+                Under 8 characters means an open network, which is the default. The portal is
+                only reachable while the node is unconfigured or the boot button was held, and
+                an open network makes it obvious that this is a setup mode rather than something
+                left running. Set a password if the node is somewhere you would rather nobody
+                walked past and reconfigured.
+
+        config CSI_PORTAL_BUTTON_GPIO
+            int "Setup button GPIO"
+            default 0
+            help
+                Held low for half a second after boot, this forces the portal even when settings
+                are stored. It is the way back for a node configured onto a network that no
+                longer exists, where nothing over the air can reach it.
+
+                GPIO0 is the boot button on the usual DevKit boards. Note that it must be pressed
+                *after* the board starts, not held through the reset: the ROM bootloader reads
+                the same pin first and would stop in serial download mode instead.
+
+        config CSI_PORTAL_BUTTON_WINDOW_MS
+            int "How long to watch the setup button at boot (ms)"
+            default 3000
+            help
+                The window has to be long enough to press into by hand after the board comes up,
+                because holding the button through reset lands in the ROM bootloader rather than
+                here. Every boot waits this long before joining, so it trades a few seconds of
+                startup for a recovery path that does not need a cable.
     endmenu
 
     config CSI_REPORT_PERIOD_S
