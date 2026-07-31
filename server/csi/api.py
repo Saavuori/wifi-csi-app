@@ -76,8 +76,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/recalibrate")
     async def recalibrate(body: dict = Body(default={})) -> dict:
-        node_id = body.get("node_id")
-        hub.recalibrate(int(node_id) if node_id is not None else None)
+        try:
+            node_id = _node_id(body.get("node_id"))
+        except ValueError as exc:
+            raise HTTPException(400, "node_id must be an integer") from exc
+        hub.recalibrate(node_id)
         return {"ok": True}
 
     # -- sessions -------------------------------------------------------------------------
@@ -239,7 +242,27 @@ async def _pump(ws: WebSocket, client: Client) -> None:
             await ws.send_text(json.dumps(message, separators=(",", ":")))
 
 
+def _node_id(value: Any) -> int | None:
+    """A node id from a client, or None for "all nodes". Raises ValueError on anything else.
+
+    `bool` is excluded deliberately: it is an `int` in Python, so `{"node_id": true}` would
+    otherwise recalibrate node 1 and nothing would say so.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError(value)
+    return int(value)
+
+
 def _handle_client_message(hub: Hub, client: Client, raw: str) -> None:
+    """Apply one message from a browser. Never raises.
+
+    The caller is the socket's own receive loop, which catches only `WebSocketDisconnect` and
+    `RuntimeError` — so anything else escaping here does not fail the message, it fails the
+    connection, and the browser reconnects having lost every view's state. A malformed message
+    is worth ignoring, never worth a disconnect.
+    """
     try:
         message = json.loads(raw)
     except json.JSONDecodeError:
@@ -247,19 +270,26 @@ def _handle_client_message(hub: Hub, client: Client, raw: str) -> None:
     if not isinstance(message, dict):
         return
 
+    try:
+        _apply_client_message(hub, client, message)
+    except (TypeError, ValueError) as exc:
+        log.debug("ignoring malformed client message %r: %s", message.get("type"), exc)
+
+
+def _apply_client_message(hub: Hub, client: Client, message: dict) -> None:
     kind = message.get("type")
     if kind == "subscribe":
         nodes = message.get("nodes")
-        client.nodes = set(int(n) for n in nodes) if isinstance(nodes, list) else None
+        client.nodes = {int(n) for n in nodes} if isinstance(nodes, list) else None
         if "frames" in message:
             client.frames = bool(message["frames"])
         if "decimate" in message:
             client.decimate = max(1, int(message["decimate"]))
     elif kind == "config":
-        hub.update_config(message.get("config", {}))
+        config = message.get("config")
+        hub.update_config(config if isinstance(config, dict) else {})
     elif kind == "recalibrate":
-        node_id = message.get("node_id")
-        hub.recalibrate(int(node_id) if node_id is not None else None)
+        hub.recalibrate(_node_id(message.get("node_id")))
     elif kind == "ping":
         client.send({"type": "pong", "t": message.get("t")})
 

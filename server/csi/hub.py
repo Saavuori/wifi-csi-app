@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -53,6 +54,35 @@ log = logging.getLogger("csi.hub")
 # A client that cannot keep up gets its oldest frames dropped rather than blocking ingest. A
 # second of history is plenty of slack for a browser tab that briefly went to the background.
 CLIENT_QUEUE = 256
+
+
+def _section(patch: dict, name: str) -> dict:
+    """One block of a config patch. A non-object where an object was expected is an empty one —
+    `patch["presence"] = 3` should change nothing, not raise."""
+    section = patch.get(name)
+    return section if isinstance(section, dict) else {}
+
+
+def _number(value: Any, minimum: float, maximum: float) -> float | None:
+    """A client-supplied number, or None if it is not one.
+
+    `bool` is rejected before anything else because `True` is an `int` in Python: a checkbox
+    posted into a numeric field would otherwise set a one-second analysis window and look, from
+    the config echo, like a deliberate choice.
+
+    Out of range is rejected rather than clamped. Clamping answers a nonsensical request with a
+    plausible-looking number, and the config echo the UI renders from would then disagree with
+    what was asked for while giving no sign that anything was refused.
+    """
+    if value is None or isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(out) or not (minimum <= out <= maximum):
+        return None
+    return out
 
 
 @dataclass(eq=False)  # identity, not value: clients live in a set and two are never the same
@@ -534,43 +564,69 @@ class Hub:
         }
 
     def update_config(self, patch: dict) -> dict:
-        """Apply a partial config update from the UI. Unknown keys are ignored on purpose —
-        the client should not be able to crash the server with a typo."""
+        """Apply a partial config update from the UI.
+
+        Every value is coerced through `_number`, which returns None for anything that is not a
+        finite number in range — and a key whose value does not survive that is dropped, exactly
+        as an unknown key is. The rule the whole method is written to keep is that a client
+        cannot crash the server with a typo, and it was only half kept: unknown *keys* were
+        ignored, but a known key holding `"20"` or `null` reached a bare `float()` and raised.
+
+        That is not a hypothetical. This runs on two paths and the raise is worse on both. Over
+        HTTP it is a 500. Over the WebSocket it unwinds through `_handle_client_message` into the
+        receive loop, which catches only `WebSocketDisconnect` and `RuntimeError`, so the socket
+        is torn down and the browser reconnects with every view's state lost — from one slider.
+        """
         s = self.settings
 
-        pre = patch.get("preprocess", {})
-        if "norm_mode" in pre and pre["norm_mode"] in ("hybrid", "rssi", "rms", "none"):
+        pre = _section(patch, "preprocess")
+        if pre.get("norm_mode") in ("hybrid", "rssi", "rms", "none"):
             s.preprocess.norm_mode = pre["norm_mode"]
         for key in ("drop_pilots", "hampel_enabled"):
             if key in pre:
                 setattr(s.preprocess, key, bool(pre[key]))
-        for key in ("agc_step_db", "agc_uniformity"):
-            if key in pre:
-                setattr(s.preprocess, key, float(pre[key]))
+        for key, lo, hi in (("agc_step_db", 0.0, 60.0), ("agc_uniformity", 0.0, 10.0)):
+            value = _number(pre.get(key), lo, hi) if key in pre else None
+            if value is not None:
+                setattr(s.preprocess, key, value)
 
-        pres = patch.get("presence", {})
-        for key in ("window_s", "calibration_s", "enter_sigma", "exit_sigma", "debounce_s"):
-            if key in pres:
-                setattr(s.presence, key, float(pres[key]))
+        pres = _section(patch, "presence")
+        for key, lo, hi in (
+            ("window_s", 0.1, 300.0),
+            ("calibration_s", 1.0, 3600.0),
+            ("enter_sigma", 0.0, 1000.0),
+            ("exit_sigma", 0.0, 1000.0),
+            ("debounce_s", 0.0, 600.0),
+        ):
+            value = _number(pres.get(key), lo, hi) if key in pres else None
+            if value is not None:
+                setattr(s.presence, key, value)
         if "use_pca" in pres:
             s.presence.use_pca = bool(pres["use_pca"])
-        if "gate_quantile" in pres:
-            s.presence.selection.gate_quantile = float(pres["gate_quantile"])
-        if "top_k" in pres:
-            s.presence.selection.top_k = int(pres["top_k"])
+        gate = _number(pres.get("gate_quantile"), 0.0, 0.95)
+        if gate is not None:
+            s.presence.selection.gate_quantile = gate
+        top_k = _number(pres.get("top_k"), 1, 512)
+        if top_k is not None:
+            s.presence.selection.top_k = int(top_k)
 
         for name, cfg in (("breathing", s.breathing), ("heart", s.heart)):
-            patch_cfg = patch.get(name, {})
-            if "window_s" in patch_cfg:
-                cfg.window_s = float(patch_cfg["window_s"])
-            if "n_subcarriers" in patch_cfg:
-                cfg.n_subcarriers = int(patch_cfg["n_subcarriers"])
-            if "band" in patch_cfg and len(patch_cfg["band"]) == 2:
-                lo, hi = (float(v) for v in patch_cfg["band"])
-                if 0 < lo < hi:
+            patch_cfg = _section(patch, name)
+            window_s = _number(patch_cfg.get("window_s"), 0.1, 300.0)
+            if window_s is not None:
+                cfg.window_s = window_s
+            n_subcarriers = _number(patch_cfg.get("n_subcarriers"), 1, 512)
+            if n_subcarriers is not None:
+                cfg.n_subcarriers = int(n_subcarriers)
+            band = patch_cfg.get("band")
+            if isinstance(band, (list, tuple)) and len(band) == 2:
+                lo = _number(band[0], 0.0, 1e6)
+                hi = _number(band[1], 0.0, 1e6)
+                if lo is not None and hi is not None and 0 < lo < hi:
                     cfg.band = (lo, hi)
-            if "gate_quantile" in patch_cfg:
-                cfg.selection.gate_quantile = float(patch_cfg["gate_quantile"])
+            gate = _number(patch_cfg.get("gate_quantile"), 0.0, 0.95)
+            if gate is not None:
+                cfg.selection.gate_quantile = gate
 
         config = self.config_dict()
         self.broadcast({"type": "config", "config": config})
