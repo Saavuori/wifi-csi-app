@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.signal import butter, savgol_filter, sosfiltfilt
 
-from ..ring import FrameRing
+from ..ring import History
 from .selection import BREATHING_BAND, HEART_BAND, SelectionConfig, rank_for_band
 from .util import detrend, uniform_resample
 
@@ -104,9 +104,9 @@ class VitalsEstimator:
     def __init__(self, config: VitalsConfig | None = None) -> None:
         self.config = config or VitalsConfig.breathing()
 
-    def estimate(self, ring: FrameRing) -> VitalsResult | None:
+    def estimate(self, history: History) -> VitalsResult | None:
         cfg = self.config
-        window = ring.seconds(cfg.window_s)
+        window = history.seconds(cfg.window_s)
         # Require most of the requested window to actually be present. A 20 s window that is
         # really 6 s of data still produces a confident-looking peak, and it will be wrong.
         if window.duration_s < 0.75 * cfg.window_s or len(window) < 32:

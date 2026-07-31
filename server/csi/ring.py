@@ -12,10 +12,27 @@ allocation, no growth, no GC pressure at 100 Hz.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 import numpy as np
 
 from .dsp.preprocess import Processed
+
+
+class History(Protocol):
+    """What an analyzer needs from the past. Satisfied by `FrameRing` and by `Window`.
+
+    Both implement it so that a snapshot taken off the ring can stand in for the ring itself.
+    The DSP runs in a worker thread and must not touch a buffer the ingest task is writing;
+    because it only ever reaches for history through this interface, handing it a frozen copy
+    is a substitution it cannot observe.
+    """
+
+    n_sub: int
+
+    def __len__(self) -> int: ...
+
+    def seconds(self, duration_s: float) -> Window: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +53,10 @@ class Window:
         return int(self.t_us.size)
 
     @property
+    def n_sub(self) -> int:
+        return int(self.mask.size)
+
+    @property
     def duration_s(self) -> float:
         if len(self) < 2:
             return 0.0
@@ -50,6 +71,27 @@ class Window:
     def columns(self, indices: np.ndarray) -> np.ndarray:
         """Amplitude for a subset of subcarriers, shape (n, len(indices))."""
         return self.amp[:, indices]
+
+    def seconds(self, duration_s: float) -> Window:
+        """The newest frames spanning at most `duration_s`, by device timestamp.
+
+        Same contract as `FrameRing.seconds`, selecting on the same clock — that equivalence is
+        what lets a snapshot substitute for the ring. Slices rather than copies, which is safe
+        precisely because a snapshot's arrays are already nobody else's.
+        """
+        if self.t_us.size == 0:
+            return self
+        cutoff = int(self.t_us[-1]) - int(duration_s * 1e6)
+        keep = int(np.searchsorted(self.t_us, cutoff, side="left"))
+        if keep == 0:
+            return self
+        return Window(
+            t_us=self.t_us[keep:],
+            amp=self.amp[keep:],
+            agc=self.agc[keep:],
+            rssi=self.rssi[keep:],
+            mask=self.mask,
+        )
 
 
 class FrameRing:
