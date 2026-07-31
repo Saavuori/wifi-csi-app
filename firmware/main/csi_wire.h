@@ -15,6 +15,11 @@
 #define CSI_WIRE_MAGIC 0x4353  // 'S','C' on the wire, little-endian
 #define CSI_WIRE_VERSION 2
 
+// The most subcarriers any node in this system reports: 256, from a Raspberry Pi running Nexmon
+// on an 80 MHz channel. An ESP32 gives 64 in HT20 and 128 in HT40. Buffers that have to hold a
+// whole frame size themselves from this rather than from a number typed in twice.
+#define CSI_MAX_SUBCARRIERS 256
+
 #define CSI_SEC_CHANNEL_NONE 0
 #define CSI_SEC_CHANNEL_ABOVE 1
 #define CSI_SEC_CHANNEL_BELOW 2
@@ -50,3 +55,9 @@ typedef struct __attribute__((packed)) {
 } csi_wire_header_t;
 
 _Static_assert(sizeof(csi_wire_header_t) == 30, "wire header must be 30 bytes with no padding");
+
+// Bytes on the wire for the largest frame this system can carry: header plus two int8 per
+// subcarrier. Anything that has to hold a whole frame sizes itself from this, so growing the
+// header again cannot leave a buffer behind — which is exactly what happened when v2 appended
+// eight bytes and the ring's slot size stayed where v1 had left it.
+#define CSI_WIRE_MAX_FRAME_BYTES (sizeof(csi_wire_header_t) + 2 * CSI_MAX_SUBCARRIERS)

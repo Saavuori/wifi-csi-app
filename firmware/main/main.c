@@ -36,7 +36,7 @@
 
 static const char *TAG = "csi";
 
-// Statically allocated. About 26 KB at the default slot count — worth it to have the ring exist
+// Statically allocated. About 34 KB at the default slot count — worth it to have the ring exist
 // before the WiFi driver does, and to make it impossible for a CSI callback to arrive while
 // the buffer it writes into is still being allocated.
 static csi_ring_t s_ring;

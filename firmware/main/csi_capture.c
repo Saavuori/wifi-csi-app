@@ -20,6 +20,13 @@
 
 static const char *TAG = "csi.capture";
 
+// The ring's slot size and the wire format are set in two different headers, and this is the one
+// translation unit that sees both. A slot that cannot hold the largest frame does not corrupt
+// anything — the size check below rejects it — but it drops every wide frame while every counter
+// except `oversize` reads normal, which is a much harder failure to find than a build error.
+_Static_assert(CSI_SLOT_BYTES >= CSI_WIRE_MAX_FRAME_BYTES,
+               "a ring slot must hold the largest frame this firmware can emit");
+
 static csi_ring_t *s_ring;
 static csi_capture_stats_t s_stats;
 static uint32_t s_seq;

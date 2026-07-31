@@ -17,9 +17,16 @@
 #include <stdint.h>
 
 // Sized for the largest frame any supported node produces: 256 subcarriers at two bytes each,
-// plus the header. HT20 uses a third of this; the memory is cheap and a fixed slot size keeps
-// the ring index arithmetic trivial.
-#define CSI_SLOT_BYTES 534
+// plus the 30-byte v2 header. HT20 uses a third of this; the memory is cheap and a fixed slot
+// size keeps the ring index arithmetic trivial.
+//
+// This was 534 — 512 plus the *v1* header — and stayed there when v2 appended eight bytes, so
+// it had been eight short of the frame it claims to hold ever since. `csi_capture.c` checks the
+// total against this before the memcpy, so nothing overflowed; a 256-subcarrier frame was
+// counted as `oversize` and dropped, which is a node that reports zero frames while every other
+// counter looks healthy. `CSI_WIRE_MAX_FRAME_BYTES` and the assertion beside it in
+// `csi_capture.c` keep the two from drifting apart again.
+#define CSI_SLOT_BYTES 542
 
 // Must be a power of two — the index arithmetic masks rather than divides. 64 slots is about
 // 0.8 s of headroom at 80 Hz, which is far more than the sender ever needs and cheap enough
