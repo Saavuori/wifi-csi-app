@@ -1,7 +1,15 @@
 # CSI node firmware
 
-ESP-IDF 5.x, ESP32-S3. Three roles from one image, selected in `menuconfig`. The default is
-`STATION`: one board, joined to the WiFi you already have.
+ESP-IDF 5.x. Three roles from one image, selected in `menuconfig`. The default is `STATION`: one
+board, joined to the WiFi you already have.
+
+Targets ESP32-S3 by default and the original ESP32 via `sdkconfig.defaults.esp32`. Nothing in the
+C is target-specific — the CSI configuration struct, the dual-core pinning and the lwIP affinity
+all exist on both — so the port is flash geometry and a target line, not code.
+
+Once the node has been set up once, **the settings live on the device, not in the image**. SSID,
+password, BSSID lock, server address, node id and probe rate are all editable from a web page the
+node serves itself; `menuconfig` supplies the values a freshly flashed board starts with.
 
 ## The rules this firmware exists to obey
 
@@ -107,6 +115,45 @@ rate and the receiver listens promiscuously, filtered to the transmitter's MAC, 
 link is TX→RX through the room and the rate is entirely yours. Set `CSI_PEER_MAC` on the
 receiver to the transmitter's MAC, which the transmitter prints at boot.
 
+## The setup page
+
+The BSSID lock is the one setting you cannot know before the node has been somewhere: it is
+chosen by reading a scan from where the board actually sits, and choosing again is the normal way
+to move the sensing line to a different doorway. Compiling it in makes that a rebuild-and-reflash
+cycle, needing a toolchain, a cable and the download-mode dance, for a value the device itself is
+best placed to offer a menu of.
+
+So the node serves a settings page, in two places:
+
+- **On your network, at the node's own address**, printed at boot as `setup page at http://…`.
+  This is the everyday one, and it runs while the node goes on measuring.
+- **On a setup network of its own** (`csi-setup-xxxxxx`, at `http://192.168.4.1`) when the node
+  cannot reach your network at all. This is the recovery path.
+
+Hit **Scan** and the page lists every access point in range with BSSID, channel and RSSI;
+clicking a row fills in the SSID and the lock together. **Save and restart** writes to NVS, and
+the values survive reflashing as long as the flash is not erased.
+
+Three ways into the recovery portal, in the order they are checked:
+
+1. **The setup button held for half a second after boot.** Press it *after* the board is up, not
+   through the reset: on the usual DevKit boards this is GPIO0, which the ROM bootloader reads
+   first and would take into serial download mode instead. The window is three seconds and the
+   log says when it opens.
+2. **A stored configuration that cannot work** — an unset or malformed server address.
+3. **A join that fails** after the full retry budget: a changed password, a vanished access
+   point, or a board still carrying the placeholder SSID.
+
+A board flashed with real values in `menuconfig` boots straight into measuring. The portal is for
+boards that have nothing usable, not a step to confirm what was just compiled in.
+
+Leaving the page running costs one task blocked on a listening socket and about 12 KB of heap. It
+is in neither the CSI callback nor the packer, and it is pinned to Core 1 below the sender and
+the prober, so a request arriving mid-capture waits for them rather than the other way round.
+Measured on hardware, serving the page and running a scan through it cost no frames. It has no
+authentication — anyone on your network can read the settings, minus the WiFi password, and
+change them. `CSI_PORTAL_IN_STATION` turns it off.
+
 ## Build
 
 ```sh
@@ -118,7 +165,31 @@ idf.py menuconfig      # CSI node -> role, SSID, server address, BSSID lock
 idf.py build flash monitor
 ```
 
+On the original ESP32, the extra defaults file carries the target and the 4 MB flash layout:
+
+```sh
+idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32" set-target esp32
+idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32" build flash monitor
+```
+
+`scripts/gen_local_config.py` writes a `sdkconfig.local` fragment from a WiFi password kept in
+`wifi.local.txt`, so the password reaches the build without passing through a shell history or a
+terminal scrollback. Both files are gitignored:
+
+```sh
+echo "PASSWORD=..." > wifi.local.txt
+python scripts/gen_local_config.py --ssid "my-net" --server 192.168.0.10 --probe udp \
+    --bssid aa:bb:cc:dd:ee:ff
+```
+
+**Reflashing keeps the saved settings** as long as the flash is not erased: `write_flash` only
+erases the sectors it writes, and the partition table's sector ends below NVS. `erase_flash` or
+`--erase-all` sends the node back to the compiled-in values.
+
 ### Settings that matter
+
+All of these are starting values. Anything saved from the setup page wins until the flash is
+erased.
 
 | Setting | Default | Why |
 |---|---|---|
@@ -178,6 +249,41 @@ The station role's second line is about the link rather than the board:
 
 The `sequence gaps under 1%` criterion is measured at the server, on the Node health view, which
 counts device-side drops and in-flight losses together — which is what you actually care about.
+
+## Measured on hardware
+
+First run on a real board: an ESP32-D0WDQ6 (4 MB, CP210x) against a TP-Link Deco M9 mesh, ESP-IDF
+v5.3.2.
+
+| | |
+|---|---|
+| Rate | 96–99 Hz, 3.7 ms jitter |
+| Sequence gaps | 0.00%, zero gaps over 96k frames |
+| Probe yield | 96–100% |
+| Ring drops / send errors | 0 / 0 |
+| Roams | 0 with the BSSID lock set |
+| SNR | 47 dB at −47 dBm on the near access point |
+
+Three things that only showed up with a radio attached:
+
+- **The mesh steered the node between access points across a reboot** — −45 dBm and 45 dB SNR on
+  one boot, −82 dBm and 13 dB on the next, same SSID, same channel, with nothing in the data to
+  say the far end of the link had moved to another room. `CSI_LOCK_BSSID` is not optional on a
+  mesh; it is the difference between a baseline that means something and one that does not.
+- **The router stopped answering ICMP** after sustained probing at 100 Hz, taking the yield to 0%
+  while still answering a laptop at 4 Hz. `CSI_PROBE_UDP_ECHO` restored it to 96%, and the yield
+  is exact there because both ends are ours. Expect to need it on consumer mesh hardware.
+- **`app_main`'s default 3584-byte stack is not enough** once the boot scan's results array and
+  the settings validation are both on it. Raised to 8192 in `sdkconfig.defaults`; the failure was
+  a boot loop with `A stack overflow in task main`, not a subtle one.
+
+Two lines in `sdkconfig.defaults` were also found to be doing nothing: `CONFIG_ESP_WIFI_TASK_CORE_ID_0`
+and `CONFIG_ESP_WIFI_PS_NONE` are not symbols in IDF 5.x, and a defaults file only warns about a
+name it does not recognise. The behaviour was right anyway — core 0 is the IDF default, and power
+save is turned off by the `esp_wifi_set_ps()` call in `csi_wifi.c`, which the boot log confirms
+with `wifi:Set ps type: 0` — but the file was claiming credit it had not earned. The first is
+fixed to `CONFIG_ESP_WIFI_TASK_PINNED_TO_CORE_0`; the second is now a comment pointing at the code
+that actually enforces it.
 
 ## Deferred
 

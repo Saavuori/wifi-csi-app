@@ -23,7 +23,7 @@ and the sampling rate is a property of the node rather than of the household's t
 |---|---|
 | `firmware/` | ESP-IDF project for the node. One image, three roles. |
 | `server/` | Python: UDP ingest, recorder, replayer, DSP, HTTP + WebSocket. |
-| `web/` | TypeScript + canvas front end. No framework. |
+| `web/` | TypeScript + canvas front end. No framework. Works on a phone, which is where the placement tuner belongs. |
 | `docs/` | Wire formats. |
 | `deploy/` | Container and reverse-proxy configuration. |
 
@@ -50,21 +50,41 @@ and starts tracking the scenario, and the breathing view settles near 14.
 For front-end work, `cd web && npm run dev` proxies `/api` and `/ws` to the Python server on
 8080 and gives you hot reload.
 
+The server listens on all interfaces, so any device on the same network reaches it at
+`http://<server-ip>:8080`. The front end is laid out for a phone as well as a desktop — same
+views, same canvases, same numbers, with the sidebar becoming a bottom tab bar. That matters for
+the Placement view in particular: it exists to be watched while you are across the room holding
+the node, and the number it shows has to be the real one. On Windows the firewall usually needs
+an inbound rule for the interpreter running the server.
+
 ## With hardware
 
 Read `firmware/README.md` first — it lists the handful of settings that decide whether the
 capture works at all, and why. In short:
 
 1. Flash one board with your SSID and `CSI_SERVER_HOST` pointing at this server.
-2. Read the boot scan. It lists every access point on your SSID with channel and RSSI — on a
-   mesh, that is several, and the phone app does not show them to you.
+2. Read the boot scan, or open the node's setup page and press **Scan**. Either lists every
+   access point in range with channel and RSSI — on a mesh that is several, and the phone app
+   does not show them to you.
 3. Pick the one whose line to the node crosses the doorway, bed, or hallway you care about, and
-   put its BSSID in `CSI_LOCK_BSSID`. **That choice is the placement decision.** The system
-   senses along that line; the node is one end of it and you do not get to move the other.
-4. Reflash and watch the Node health view for a stable rate, sub-1% loss, and `roams` at zero.
+   lock the node to its BSSID. **That choice is the placement decision.** The system senses along
+   that line; the node is one end of it and you do not get to move the other. It is not the
+   strongest access point that wins, it is the one with the right geometry.
+4. Watch the Node health view for a stable rate, sub-1% loss, and `roams` at zero.
 
 If `roams` climbs, the mesh is still moving the node between access points and every calibration
 dies with each move. Fix that before trusting anything downstream of it.
+
+**Settings live on the node, not in the image.** After the first flash, the board serves a
+settings page — at its own address on your network, printed at boot, and on a `csi-setup-xxxxxx`
+network of its own when it cannot reach yours. Changing network, access point, server address or
+probe rate needs no toolchain and no cable, and reflashing keeps what you saved.
+
+The firmware runs on the original ESP32 as well as the S3: `firmware/sdkconfig.defaults.esp32`
+carries the target and the 4 MB flash layout, and no C changes are needed.
+
+The two-board pair is still supported and described in the firmware README, but one board is the
+default and the place to start.
 
 ## The phases
 
@@ -72,7 +92,7 @@ Numbered as in the build plan.
 
 | Phase | Where | State |
 |---|---|---|
-| 1 — Firmware | `firmware/` | Implemented; the ring and wire layout have host tests, the radio path and the probe yield need a board |
+| 1 — Firmware | `firmware/` | Implemented and **run on hardware**: 96–99 Hz, zero sequence gaps, 96–100% probe yield. See the measurements in `firmware/README.md` |
 | 2 — Ingest + recorder | `server/csi/{ingest,recorder,replay,sessions}.py` | Implemented and tested |
 | 3 — Waterfall | `web/src/views/waterfall.ts` | Implemented |
 | 4 — Motion + presence | `server/csi/dsp/{presence,selection}.py` | Implemented and tested |

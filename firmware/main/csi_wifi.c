@@ -11,6 +11,8 @@
 #include "freertos/event_groups.h"
 #include "nvs_flash.h"
 
+#include "csi_settings.h"
+
 static const char *TAG = "csi.wifi";
 
 #define CONNECTED_BIT BIT0
@@ -29,6 +31,7 @@ static bool s_have_bssid;
 static uint8_t s_link_epoch;
 static uint32_t s_disconnects;
 static uint32_t s_gateway;
+static uint32_t s_ip;
 static csi_wifi_link_cb_t s_link_cb;
 
 void csi_wifi_set_link_cb(csi_wifi_link_cb_t cb) { s_link_cb = cb; }
@@ -67,6 +70,7 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)data;
         s_gateway = event->ip_info.gw.addr;
+        s_ip = event->ip_info.ip.addr;
         ESP_LOGI(TAG, "got ip " IPSTR ", gateway " IPSTR, IP2STR(&event->ip_info.ip),
                  IP2STR(&event->ip_info.gw));
         s_retries = 0;
@@ -82,12 +86,13 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
 // chosen AP and this node is the line the system senses along, so the useful one is whichever
 // AP puts a doorway, a bed, or a hallway on that line — not necessarily the strongest.
 static void scan_and_log(void) {
+    const csi_settings_t *settings = csi_settings();
     wifi_scan_config_t scan = {
-        .ssid = (uint8_t *)CONFIG_CSI_WIFI_SSID,
+        .ssid = (uint8_t *)settings->ssid,
         .show_hidden = false,
     };
 
-    ESP_LOGI(TAG, "scanning for \"%s\" ...", CONFIG_CSI_WIFI_SSID);
+    ESP_LOGI(TAG, "scanning for \"%s\" ...", settings->ssid);
     esp_err_t err = esp_wifi_scan_start(&scan, true);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "scan failed (%s); continuing to associate", esp_err_to_name(err));
@@ -97,7 +102,10 @@ static void scan_and_log(void) {
     uint16_t found = 0;
     esp_wifi_scan_get_ap_num(&found);
 
-    wifi_ap_record_t records[SCAN_MAX_APS];
+    // Static, not automatic: at 16 entries this is over a kilobyte, and app_main's stack also has
+    // to carry WiFi initialisation and the association. It is written once, from one task, before
+    // anything else is running.
+    static wifi_ap_record_t records[SCAN_MAX_APS];
     uint16_t count = SCAN_MAX_APS;
     if (esp_wifi_scan_get_ap_records(&count, records) != ESP_OK) {
         return;
@@ -114,20 +122,20 @@ static void scan_and_log(void) {
                  records[i].bssid[1], records[i].bssid[2], records[i].bssid[3],
                  records[i].bssid[4], records[i].bssid[5], records[i].primary, records[i].rssi);
     }
-    ESP_LOGI(TAG, "set CSI_LOCK_BSSID to one of these to pin the node to it");
+    ESP_LOGI(TAG, "lock the node to one of these on the setup page, or with CSI_LOCK_BSSID");
 }
 
 esp_err_t csi_wifi_start_sta(void) {
-    esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        err = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(err);
+    const csi_settings_t *settings = csi_settings();
 
+    // NVS is initialised by csi_settings_load(), which every path into here has already called —
+    // it has to, because the SSID this function is about to use comes from it.
     s_events = xEventGroupCreate();
     ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_err_t err = esp_event_loop_create_default();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        return err;
+    }
     esp_netif_create_default_wifi_sta();
 
     wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
@@ -139,9 +147,8 @@ esp_err_t csi_wifi_start_sta(void) {
                                                         &on_wifi_event, NULL, NULL));
 
     wifi_config_t config = {0};
-    strncpy((char *)config.sta.ssid, CONFIG_CSI_WIFI_SSID, sizeof(config.sta.ssid) - 1);
-    strncpy((char *)config.sta.password, CONFIG_CSI_WIFI_PASSWORD,
-            sizeof(config.sta.password) - 1);
+    strncpy((char *)config.sta.ssid, settings->ssid, sizeof(config.sta.ssid) - 1);
+    strncpy((char *)config.sta.password, settings->password, sizeof(config.sta.password) - 1);
 
     // Protected management frames, capable but not required. Home mesh systems commonly run
     // WPA2/WPA3 transitional with PMF optional, and a station that advertises neither is
@@ -153,7 +160,7 @@ esp_err_t csi_wifi_start_sta(void) {
     }
 
     uint8_t locked[6];
-    const bool lock = csi_wifi_parse_mac(CONFIG_CSI_LOCK_BSSID, locked);
+    const bool lock = csi_wifi_parse_mac(settings->lock_bssid, locked);
     if (lock) {
         memcpy(config.sta.bssid, locked, 6);
         config.sta.bssid_set = true;
@@ -183,7 +190,7 @@ esp_err_t csi_wifi_start_sta(void) {
         // which changes the geometry of every measurement without changing anything the
         // analysis can see. The server detects it after the fact from the link epoch and throws
         // the history away, which is correct but expensive — you lose the calibration.
-        ESP_LOGW(TAG, "CSI_LOCK_BSSID is not set: on a mesh network this node may be steered "
+        ESP_LOGW(TAG, "no BSSID lock is set: on a mesh network this node may be steered "
                       "between access points mid-session");
     }
 
@@ -192,7 +199,7 @@ esp_err_t csi_wifi_start_sta(void) {
     EventBits_t bits = xEventGroupWaitBits(s_events, CONNECTED_BIT | FAILED_BIT, pdFALSE, pdFALSE,
                                            portMAX_DELAY);
     if (!(bits & CONNECTED_BIT)) {
-        ESP_LOGE(TAG, "could not join %s", CONFIG_CSI_WIFI_SSID);
+        ESP_LOGE(TAG, "could not join %s", settings->ssid);
         return ESP_FAIL;
     }
     return ESP_OK;
@@ -250,3 +257,5 @@ uint8_t csi_wifi_link_epoch(void) { return s_link_epoch; }
 uint32_t csi_wifi_disconnects(void) { return s_disconnects; }
 
 uint32_t csi_wifi_gateway(void) { return s_gateway; }
+
+uint32_t csi_wifi_ip(void) { return s_ip; }

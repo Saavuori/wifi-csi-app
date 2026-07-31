@@ -48,3 +48,8 @@ uint32_t csi_wifi_disconnects(void);
 
 // The DHCP-assigned default gateway, network byte order, or 0 before the first lease.
 uint32_t csi_wifi_gateway(void);
+
+// This node's own address, network byte order, or 0 before the first lease. Only used to print
+// the setup page's URL at boot — the node is found by address, not by mDNS, for the same reason
+// the server is: one fewer thing to fail unattended.
+uint32_t csi_wifi_ip(void);

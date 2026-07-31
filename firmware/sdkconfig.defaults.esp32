@@ -1,0 +1,20 @@
+# Overrides for the classic ESP32, applied after sdkconfig.defaults.
+#
+# The project targets ESP32-S3. Everything in this firmware is target-neutral — the CSI
+# configuration struct, the dual-core pinning, and the lwIP affinity all exist on the original
+# ESP32 too — so the port is a matter of the target and the flash geometry, not the code.
+#
+# What you give up on this silicon: 240 MHz stays, but there is no PSRAM on a bare DevKitC and
+# the flash is usually 4 MB rather than 8. Both only affect the partition layout.
+
+CONFIG_IDF_TARGET="esp32"
+
+# 4 MB, which is what a DevKitC / WROOM-32 module carries. Overrides the 8 MB assumed for the S3.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+
+# The default single-app layout gives the application 1 MB. With WiFi, lwIP and
+# COMPILER_OPTIMIZATION_PERF that is close enough to the edge to fail on an unrelated change;
+# the "large" single-app layout gives 1.5 MB and still fits 4 MB of flash comfortably.
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+CONFIG_PARTITION_TABLE_FILENAME="partitions_singleapp_large.csv"

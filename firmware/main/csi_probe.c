@@ -37,6 +37,7 @@ void csi_probe_get_stats(csi_probe_stats_t *out) { *out = (csi_probe_stats_t){0}
 #include "lwip/icmp.h"
 #endif
 
+#include "csi_settings.h"
 #include "csi_wifi.h"
 
 static const char *TAG = "csi.probe";
@@ -82,6 +83,8 @@ static void drain(int sock) {
 static void probe_task(void *arg) {
     (void)arg;
 
+    const csi_settings_t *settings = csi_settings();
+
     struct sockaddr_in dest = {0};
     dest.sin_family = AF_INET;
 
@@ -119,35 +122,35 @@ static void probe_task(void *arg) {
         return;
     }
     dest.sin_port = htons(CONFIG_CSI_ECHO_PORT);
-    if (inet_pton(AF_INET, CONFIG_CSI_SERVER_HOST, &dest.sin_addr) != 1) {
-        ESP_LOGE(TAG, "bad server address %s", CONFIG_CSI_SERVER_HOST);
+    if (inet_pton(AF_INET, settings->server_host, &dest.sin_addr) != 1) {
+        ESP_LOGE(TAG, "bad server address %s", settings->server_host);
         close(sock);
         vTaskDelete(NULL);
         return;
     }
 #endif
 
-    const TickType_t period = pdMS_TO_TICKS(1000 / CONFIG_CSI_PROBE_RATE_HZ);
+    const TickType_t period = pdMS_TO_TICKS(1000 / settings->probe_rate_hz);
     if (period == 0) {
         // A tick is 10 ms by default, which caps the rate at 100 Hz. Above that the delay rounds
         // to zero and the task spins. sdkconfig.defaults raises the tick rate to 1000 Hz so
         // 80-100 Hz lands on a clean multiple; if that was undone, say so rather than quietly
         // probing flat out.
-        ESP_LOGE(TAG, "tick rate too coarse for %d Hz; raise CONFIG_FREERTOS_HZ",
-                 CONFIG_CSI_PROBE_RATE_HZ);
+        ESP_LOGE(TAG, "tick rate too coarse for %u Hz; raise CONFIG_FREERTOS_HZ",
+                 (unsigned)settings->probe_rate_hz);
         close(sock);
         vTaskDelete(NULL);
         return;
     }
 
     const uint32_t addr = dest.sin_addr.s_addr;  // network order: low byte is the first octet
-    ESP_LOGI(TAG, "probing %u.%u.%u.%u at %d Hz (%s, period %u ticks) on core %d",
+    ESP_LOGI(TAG, "probing %u.%u.%u.%u at %u Hz (%s, period %u ticks) on core %d",
              (unsigned)(addr & 0xFF), (unsigned)((addr >> 8) & 0xFF),
              (unsigned)((addr >> 16) & 0xFF), (unsigned)((addr >> 24) & 0xFF),
-             CONFIG_CSI_PROBE_RATE_HZ, method, (unsigned)period, xPortGetCoreID());
+             (unsigned)settings->probe_rate_hz, method, (unsigned)period, xPortGetCoreID());
 
 #if CONFIG_CSI_PROBE_ICMP
-    const uint16_t id = (uint16_t)(CONFIG_CSI_NODE_ID | 0xC500);
+    const uint16_t id = (uint16_t)(settings->node_id | 0xC500);
     probe_packet_t packet;
     memset(&packet, 0, sizeof(packet));
 #else

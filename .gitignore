@@ -11,3 +11,8 @@ build/
 managed_components/
 sdkconfig
 sdkconfig.old
+
+# WiFi password for the local build, and the sdkconfig fragment generated from it.
+# Never committed.
+firmware/wifi.local.txt
+firmware/sdkconfig.local
