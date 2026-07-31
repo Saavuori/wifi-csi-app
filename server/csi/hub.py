@@ -5,6 +5,13 @@ exactly the same route: parse, health accounting, record, preprocess, push to th
 fan out to clients. Analysis runs on a separate slow timer over the rings, because presence and
 breathing want a window, not a frame, and there is no reason to run an SVD at 80 Hz.
 
+That timer hands the actual DSP to a worker thread. An SVD and two filtfilts on the event loop
+are milliseconds that the UDP listener and the WebSocket writers spend waiting, and the socket
+buffer is the only thing absorbing it; the cost shows up as jitter in the very timestamps the
+analysis then measures its sample rate from. NumPy and SciPy drop the GIL for most of that work,
+so moving it off the loop is close to free — provided the thread never touches the live ring.
+`history_for` is that boundary, and `NodeState` defers detector mutations across it.
+
 Keeping live and replay on one path is not a tidiness preference. It is the thing that makes a
 recording a valid substitute for the room, which is what lets the detector be developed at a
 desk instead of on the floor.
@@ -38,7 +45,7 @@ from .nodes import NodeHealth
 from .protocol import ProtocolError, parse_frame
 from .recorder import Recorder
 from .replay import Replayer
-from .ring import FrameRing
+from .ring import FrameRing, History, Window
 from .sessions import SessionStore
 
 log = logging.getLogger("csi.hub")
@@ -96,6 +103,12 @@ class NodeState:
         self.ring: FrameRing | None = None
         self.last_metrics: dict = {}
 
+        # Set while this node's analysis is running in a worker thread. The presence detector
+        # is stateful — a baseline, a calibration accumulator, a debounced state machine — so
+        # anything on the event loop that would rewind it waits rather than racing it.
+        self.analyzing = False
+        self._pending: str | None = None
+
     def ensure_ring(self, n_sub: int) -> FrameRing:
         if self.ring is None or self.ring.n_sub != n_sub:
             self.ring = FrameRing(n_sub, self.settings.ring_capacity())
@@ -104,10 +117,36 @@ class NodeState:
     def reset(self) -> None:
         """Forget history. Used on node reboot and when a replay starts or seeks — carrying a
         window across a discontinuity puts a step change into every analysis at once."""
-        self.pre.reset()
+        self._request("reset")
+
+    def recalibrate(self) -> None:
+        """Throw away the presence baseline but keep the history."""
+        self._request("recalibrate")
+
+    def _request(self, op: str) -> None:
+        if self.analyzing:
+            # A half-applied recalibration is the failure this avoids: the worker appending to
+            # a calibration accumulator that the loop just cleared leaves a baseline measured
+            # over both sides of the discontinuity, which is how you get a detector that never
+            # fires again. `reset` subsumes `recalibrate`, so it wins if both are asked for.
+            self._pending = "reset" if "reset" in (op, self._pending) else op
+            return
+        self._apply(op)
+
+    def _apply(self, op: str) -> None:
         self.presence.recalibrate()
-        if self.ring is not None:
-            self.ring.clear()
+        if op == "reset":
+            self.pre.reset()
+            if self.ring is not None:
+                self.ring.clear()
+
+    def take_pending(self) -> bool:
+        """Apply whatever was deferred during analysis. True if the in-flight result is stale."""
+        op, self._pending = self._pending, None
+        if op is None:
+            return False
+        self._apply(op)
+        return True
 
 
 class Hub:
@@ -300,11 +339,11 @@ class Hub:
         while not self._stopping:
             await asyncio.sleep(period)
             try:
-                self._emit_metrics()
+                await self._emit_metrics()
             except Exception:  # a bad window must not kill the loop for the rest of the session
                 log.exception("metrics computation failed")
 
-    def _emit_metrics(self) -> None:
+    async def _emit_metrics(self) -> None:
         """Compute always; broadcast only when someone is listening.
 
         Skipping the computation when no browser is connected looks like an easy saving and is
@@ -319,8 +358,21 @@ class Hub:
         depend on a browser being open all night.
         """
         now = time.time()
-        for state in self.nodes.values():
-            metrics = self.compute_metrics(state)
+        # Iterate a copy: awaiting below lets ingest run, and a node appearing mid-pass would
+        # otherwise resize the dict underneath us.
+        for state in list(self.nodes.values()):
+            history = self.history_for(state)
+            if history is None:
+                continue
+            state.analyzing = True
+            try:
+                metrics = await asyncio.to_thread(self.compute_metrics, state, history)
+            finally:
+                state.analyzing = False
+            if state.take_pending():
+                # A reboot, a replay seek or a recalibrate landed while that ran. The result
+                # describes a room that no longer exists as far as this node is concerned.
+                continue
             if metrics is None:
                 continue
             state.last_metrics = metrics
@@ -329,29 +381,50 @@ class Hub:
         if self.clients:
             self.broadcast({"type": "nodes", "nodes": self.node_report(now)})
 
-    def compute_metrics(self, state: NodeState) -> dict | None:
+    def history_for(self, state: NodeState) -> Window | None:
+        """Copy a node's history out of the live ring, on the event loop.
+
+        This is what makes threading the DSP safe. The analyzers reach for windows as they go;
+        a worker doing that against the live ring would be reading a buffer the ingest task is
+        writing, and would eventually get a window torn across the write pointer — samples from
+        two different points in time in one array, spliced at whatever index the writer had
+        reached. One copy of the longest span anyone will ask for costs a few hundred kilobytes
+        and a memcpy, and every sub-window then comes off that frozen copy.
+
+        Note this is a *narrower* copy than the ring: analysis never looks past the longest
+        configured window, so there is no reason to snapshot the full two minutes of history.
+        """
         ring = state.ring
         if ring is None or len(ring) < 16:
             return None
+        s = self.settings
+        span_s = max(s.presence.window_s, s.breathing.window_s, s.heart.window_s)
+        history = ring.seconds(span_s)
+        return history if len(history) >= 16 else None
 
-        out: dict = {"node_id": state.node_id, "n_sub": ring.n_sub}
+    def compute_metrics(self, state: NodeState, history: History) -> dict | None:
+        """Runs in a worker thread over a snapshot from `history_for`, never `state.ring`."""
+        if len(history) < 16:
+            return None
 
-        presence = state.presence.update(ring)
+        out: dict = {"node_id": state.node_id, "n_sub": history.n_sub}
+
+        presence = state.presence.update(history)
         if presence is not None:
             out["presence"] = presence.as_dict()
 
-        breathing = state.breathing.estimate(ring)
+        breathing = state.breathing.estimate(history)
         if breathing is not None:
             out["breathing"] = breathing.as_dict()
 
-        if self.settings.heart.window_s > 0 and len(ring) > 64:
-            heart = state.heart.estimate(ring)
+        if self.settings.heart.window_s > 0 and len(history) > 64:
+            heart = state.heart.estimate(history)
             if heart is not None:
                 out["heart"] = heart.as_dict()
 
         # The placement tuner wants one number that responds immediately to the node being
         # moved, so it runs on a short window regardless of the breathing window setting.
-        tuner_window = ring.seconds(min(20.0, self.settings.breathing.window_s))
+        tuner_window = history.seconds(min(20.0, self.settings.breathing.window_s))
         if len(tuner_window) > 32:
             out["placement"] = {
                 "breathing_snr_db": round(band_snr_db(tuner_window, BREATHING_BAND), 2),
@@ -367,7 +440,7 @@ class Hub:
             )
             out["selection"] = ranked.as_dict()
 
-        window = ring.seconds(self.settings.presence.window_s)
+        window = history.seconds(self.settings.presence.window_s)
         if len(window) > 4:
             valid = np.flatnonzero(window.mask)
             out["variance"] = {
@@ -488,5 +561,5 @@ class Hub:
     def recalibrate(self, node_id: int | None = None) -> None:
         for state in self.nodes.values():
             if node_id is None or state.node_id == node_id:
-                state.presence.recalibrate()
+                state.recalibrate()
         self.broadcast({"type": "recalibrated", "node_id": node_id})

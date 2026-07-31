@@ -7,7 +7,9 @@ criterion, and the property the entire "develop against recordings" workflow res
 from __future__ import annotations
 
 import asyncio
+import threading
 
+import numpy as np
 import pytest
 
 from csi.config import Settings
@@ -401,7 +403,8 @@ async def test_hub_computes_metrics_over_a_recorded_scene(settings):
         if frame is not None:
             hub.handle_datagram(encode_frame(frame), 1000.0)
 
-    metrics = hub.compute_metrics(hub.nodes[1])
+    state = hub.nodes[1]
+    metrics = hub.compute_metrics(state, hub.history_for(state))
     assert metrics is not None
     assert metrics["node_id"] == 1
     assert metrics["presence"]["state"] in ("calibrating", "absent", "present")
@@ -409,6 +412,137 @@ async def test_hub_computes_metrics_over_a_recorded_scene(settings):
     assert "breathing_snr_db" in metrics["placement"]
     assert metrics["rate_hz"] == pytest.approx(80.0, rel=0.05)
     assert len(metrics["variance"]["values"]) == len(metrics["variance"]["subcarriers"])
+
+
+# -- analysis off the event loop -------------------------------------------------------------
+
+
+async def test_the_dsp_runs_off_the_event_loop(settings):
+    """The point of the arrangement: an SVD and two filtfilts per node per pass must not sit on
+    the loop that is servicing UDP and the WebSocket writers."""
+    hub = Hub(settings)
+    for raw in datagrams(2000):
+        hub.handle_datagram(raw, 1000.0)
+
+    ran_on: list[int] = []
+    original = hub.compute_metrics
+
+    def spy(*args):
+        ran_on.append(threading.get_ident())
+        return original(*args)
+
+    hub.compute_metrics = spy
+    await hub._emit_metrics()
+
+    assert ran_on, "the analysis did not run at all"
+    assert ran_on[0] != threading.get_ident()
+    assert hub.nodes[1].last_metrics["node_id"] == 1
+    assert hub.nodes[1].analyzing is False
+
+
+def test_a_snapshot_is_frozen_against_further_ingest():
+    """What `history_for` buys. If the snapshot were a view onto the ring, a window handed to a
+    worker thread would eventually be spliced across the write pointer — two different moments
+    in one array, joined at whatever index the writer had reached."""
+    from csi.dsp.preprocess import Preprocessor
+
+    ring = FrameRing(64, 200)
+    pre = Preprocessor()
+    scene = Scene(SceneConfig(jitter_us=0))
+    for _ in range(200):
+        frame = scene.next_frame()
+        if frame is not None:
+            ring.push(pre.process(frame))
+
+    snapshot = ring.seconds(60.0)
+    t_before = snapshot.t_us.copy()
+    amp_before = snapshot.amp.copy()
+
+    # Overwrite every slot the snapshot came from, twice over.
+    for _ in range(400):
+        frame = scene.next_frame()
+        if frame is not None:
+            ring.push(pre.process(frame))
+
+    assert np.array_equal(snapshot.t_us, t_before)
+    assert np.array_equal(snapshot.amp, amp_before, equal_nan=True)
+    assert snapshot.t_us[-1] < ring.seconds(60.0).t_us[-1], "the ring did move on"
+
+
+def test_a_snapshot_windows_the_same_way_the_ring_does():
+    """The substitution the analyzers cannot be allowed to notice: they call `.seconds()` on
+    whatever history they are given, and must get the same answer either way."""
+    from csi.dsp.preprocess import Preprocessor
+
+    ring = FrameRing(64, 4000)
+    pre = Preprocessor()
+    scene = Scene(SceneConfig(rate_hz=80.0, drop_rate=0.2))
+    for _ in range(2000):
+        frame = scene.next_frame()
+        if frame is not None:
+            ring.push(pre.process(frame))
+
+    snapshot = ring.seconds(20.0)
+    assert snapshot.n_sub == ring.n_sub
+    for duration in (0.5, 2.0, 5.0, 20.0):
+        direct = ring.seconds(duration)
+        via = snapshot.seconds(duration)
+        assert len(via) == len(direct)
+        assert np.array_equal(via.t_us, direct.t_us)
+        assert np.array_equal(via.amp, direct.amp, equal_nan=True)
+
+
+def test_a_reset_during_analysis_is_deferred_then_applied(settings):
+    """Clearing the ring or rewinding the detector while a worker is mid-window is the race the
+    threading introduces. The loop waits for the pass to end instead."""
+    hub = Hub(settings)
+    for raw in datagrams(500):
+        hub.handle_datagram(raw, 1000.0)
+    state = hub.nodes[1]
+
+    state.analyzing = True
+    state.reset()
+    assert len(state.ring) == 500, "the ring must survive until the analysis has finished"
+
+    state.analyzing = False
+    assert state.take_pending() is True, "the in-flight result has to be reported stale"
+    assert len(state.ring) == 0
+    assert state.take_pending() is False
+
+
+@pytest.mark.parametrize("order", [("recalibrate", "reset"), ("reset", "recalibrate")])
+def test_a_deferred_reset_outranks_a_deferred_recalibrate(settings, order):
+    hub = Hub(settings)
+    for raw in datagrams(500):
+        hub.handle_datagram(raw, 1000.0)
+    state = hub.nodes[1]
+
+    state.analyzing = True
+    for op in order:
+        getattr(state, op)()
+    state.analyzing = False
+    state.take_pending()
+
+    assert len(state.ring) == 0, "the weaker request must not swallow the stronger one"
+
+
+async def test_a_node_appearing_mid_pass_does_not_break_the_loop(settings):
+    """`_emit_metrics` awaits between nodes, so ingest can add one while it is iterating."""
+    hub = Hub(settings)
+    for raw in datagrams(600):
+        hub.handle_datagram(raw, 1000.0)
+
+    original = hub.compute_metrics
+
+    def spy(*args):
+        for raw in datagrams(20, node_id=7):
+            hub.handle_datagram(raw, 1000.0)
+        return original(*args)
+
+    hub.compute_metrics = spy
+    await hub._emit_metrics()  # must not raise "dictionary changed size during iteration"
+
+    assert set(hub.nodes) == {1, 7}
 
 
 async def test_node_reboot_clears_history(settings):

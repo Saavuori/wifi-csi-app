@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ..ring import FrameRing, Window
+from ..ring import History, Window
 from .selection import SelectionConfig, magnitude_gate
 from .util import robust_std
 
@@ -105,9 +105,9 @@ class PresenceDetector:
         self._calib_started_us = None
         self._pending = None
 
-    def update(self, ring: FrameRing) -> PresenceResult | None:
+    def update(self, history: History) -> PresenceResult | None:
         cfg = self.config
-        window = ring.seconds(cfg.window_s)
+        window = history.seconds(cfg.window_s)
         if len(window) < 8:
             return None
 
