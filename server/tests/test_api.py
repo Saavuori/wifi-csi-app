@@ -212,3 +212,81 @@ def test_websocket_ignores_malformed_client_messages(client):
         ws.send_text(json.dumps({"type": "ping", "t": 3}))
 
         assert json.loads(ws.receive_text())["type"] == "pong"
+
+
+BAD_PATCHES = [
+    {"presence": {"window_s": "wide"}},
+    {"presence": {"window_s": None}},
+    {"presence": {"top_k": "eight"}},
+    {"breathing": {"window_s": [20]}},
+    {"breathing": {"n_subcarriers": {}}},
+    {"breathing": {"band": "0.1-0.5"}},
+    {"breathing": {"band": ["a", "b"]}},
+    {"preprocess": {"agc_step_db": "loud"}},
+    {"preprocess": 3},
+]
+
+
+@pytest.mark.parametrize("patch", BAD_PATCHES)
+def test_config_patch_rejects_nonsense_without_a_500(client, patch):
+    before = client.get("/api/config").json()
+    response = client.patch("/api/config", json=patch)
+    assert response.status_code == 200
+    assert response.json() == before, "an unusable value must change nothing"
+
+
+@pytest.mark.parametrize("patch", BAD_PATCHES)
+def test_a_bad_config_message_does_not_close_the_websocket(client, patch):
+    """The receive loop catches only WebSocketDisconnect and RuntimeError, so anything else
+    escaping the handler costs the connection — and the browser reconnects with every view
+    reset. A slider that sends its value as a string must not do that."""
+    with client.websocket_connect("/ws") as ws:
+        json.loads(ws.receive_text())
+        ws.send_text(json.dumps({"type": "config", "config": patch}))
+        ws.send_text(json.dumps({"type": "ping", "t": 7}))
+
+        while True:
+            message = json.loads(ws.receive_text())
+            if message["type"] == "pong":
+                assert message["t"] == 7
+                break
+
+
+def test_config_patch_rejects_out_of_range_values(client):
+    before = client.get("/api/config").json()
+    assert client.patch("/api/config", json={"presence": {"window_s": -5.0}}).json() == before
+    assert client.patch("/api/config", json={"breathing": {"n_subcarriers": 0}}).json() == before
+    # A checkbox posted into a numeric field: True is an int, and must not become 1.
+    assert client.patch("/api/config", json={"breathing": {"window_s": True}}).json() == before
+
+
+def test_config_patch_rejects_a_non_finite_number(client):
+    """`json.loads` accepts the `NaN` and `Infinity` literals, so a client can send them even
+    though they are not in the JSON grammar. A NaN window length poisons every reduction it
+    reaches."""
+    before = client.get("/api/config").json()
+    response = client.patch(
+        "/api/config",
+        content='{"breathing": {"window_s": NaN}, "heart": {"gate_quantile": Infinity}}',
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 200
+    assert response.json() == before
+
+
+def test_recalibrate_rejects_a_non_integer_node_id(client):
+    assert client.post("/api/recalibrate", json={"node_id": "all"}).status_code == 400
+    assert client.post("/api/recalibrate", json={"node_id": 1}).status_code == 200
+    assert client.post("/api/recalibrate", json={}).status_code == 200
+
+
+def test_a_bad_subscribe_message_does_not_close_the_websocket(client):
+    with client.websocket_connect("/ws") as ws:
+        json.loads(ws.receive_text())
+        ws.send_text(json.dumps({"type": "subscribe", "nodes": ["one", "two"]}))
+        ws.send_text(json.dumps({"type": "recalibrate", "node_id": "everything"}))
+        ws.send_text(json.dumps({"type": "ping", "t": 8}))
+
+        while True:
+            if json.loads(ws.receive_text())["type"] == "pong":
+                break
