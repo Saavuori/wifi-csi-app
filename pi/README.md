@@ -53,6 +53,21 @@ do not need those.
 
 The consequence is the main operating constraint below.
 
+Only the CSI patch is ours. The base [nexmon](https://github.com/seemoo-lab/nexmon) tree —
+the cross toolchain and the firmware patching framework — is built unmodified from upstream;
+the fork is what lands in `patches/bcm43455c0/7_45_206/nexmon_csi`. The installer defaults to
+the fork and pins the branch, and either side can be pointed elsewhere without editing it:
+
+| | flag | environment | default |
+|---|---|---|---|
+| CSI patch | `--repo` | `CSI_NEXMON_REPO` | `Saavuori/nexmon_csi` |
+| its branch | `--branch` | `CSI_NEXMON_BRANCH` | `claude/rpi-wifi-csi-capture-368a70` |
+| base nexmon | `--nexmon-repo` | `CSI_NEXMON_BASE_REPO` | `seemoo-lab/nexmon` |
+
+`fetch_sources` prints both before it builds, and a resumed install whose existing checkout
+came from a different repository is repointed at the configured one rather than updated in
+place.
+
 ## What it measures, and what you have to give it
 
 While associated, the chip hands up CSI only for frames addressed to this Pi, plus broadcast.
