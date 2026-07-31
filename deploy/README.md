@@ -1,8 +1,57 @@
 # Deployment
 
-Alongside the existing apps: a podman container behind Caddy.
+Two shapes. A Raspberry Pi on a home LAN, which is what most people want and what
+`install.sh` does in one command. Or a podman container behind Caddy, alongside the existing
+apps, which is what this server runs.
+
+## Raspberry Pi
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Saavuori/wifi-csi-app/main/install.sh | bash
+```
+
+Installs Docker if it is missing, raises `net.core.rmem_max`, pulls the arm64 image, starts the
+server, and — unless you pass `--no-demo` — starts a synthetic node so there is something to
+look at without hardware. `--uninstall` reverses all of it. `--help` lists the rest.
+
+Requirements: **64-bit** Raspberry Pi OS on a Pi 4 or 5. On a 32-bit install the script stops
+and tells you why: numpy and scipy publish no armv7 wheels, so there is nothing for pip to
+install and a source build of scipy on a Pi is an afternoon.
+
+Or with compose, from a clone:
+
+```sh
+docker compose -f deploy/compose.yaml --profile demo up -d
+```
+
+Two host settings the container cannot do for itself:
+
+- **`net.core.rmem_max`.** [`ingest.py`](../server/csi/ingest.py) asks for a 4 MB UDP receive
+  buffer, but Linux clamps `SO_RCVBUF` to this sysctl *silently* — no error for the code to
+  log. The ~208 KB default is about one second of two nodes at 80 Hz, and what you see when it
+  overflows is sequence gaps with nothing in the logs to explain them.
+  ```sh
+  echo 'net.core.rmem_max=8388608' | sudo tee /etc/sysctl.d/90-csi.conf && sudo sysctl --system
+  ```
+- **Where `/data` lives.** A node at 80 Hz writes about 1 GB a day. Pointed at the SD card that
+  is a wear problem as much as a capacity one; use a USB SSD for anything longer than a test,
+  or run with `CSI_RECORD=false`.
+
+The image is `ghcr.io/saavuori/wifi-csi-app:latest`, built for linux/amd64 and linux/arm64 by
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) after the tests pass.
 
 ## Build and run
+
+`Containerfile` is a plain Dockerfile — `docker build -f deploy/Containerfile .` works
+identically. Building for a Pi from an amd64 machine needs the platform stated, because a plain
+build produces an amd64 image that will not start there:
+
+```sh
+docker buildx build --platform linux/arm64 -f deploy/Containerfile -t csi:latest .
+```
+
+The front-end stage is pinned to `$BUILDPLATFORM`, so that cross-build does not run `tsc` and
+`vite` under emulation — its output is JavaScript, which has no architecture.
 
 ```sh
 podman build -f deploy/Containerfile -t csi:latest .

@@ -12,7 +12,8 @@ managed_components/
 sdkconfig
 sdkconfig.old
 
-# WiFi password for the local build, and the sdkconfig fragment generated from it.
-# Never committed.
-firmware/wifi.local.txt
-firmware/sdkconfig.local
+# The WiFi password for the local build, and the sdkconfig fragment gen_local_config.py
+# writes from it. Both hold the password in plaintext and their own headers say they are
+# gitignored; make it true. Unanchored, so they stay ignored wherever the script is run from.
+wifi.local.txt
+sdkconfig.local
