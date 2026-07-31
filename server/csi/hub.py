@@ -179,13 +179,19 @@ class Hub:
             self.start_recording("live")
 
     async def stop(self) -> None:
+        # Closing the recorder is the one step here that has data riding on it: it is what writes
+        # `ended_at` and flushes the final session metadata. It goes in a `finally` so no earlier
+        # step can skip it — an unclean shutdown costs a `rescan`, and this is the shutdown path
+        # that is supposed to be clean.
         self._stopping = True
-        await self.stop_replay()
-        if self._metrics_task:
-            self._metrics_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._metrics_task
-        self.stop_recording()
+        try:
+            await self.stop_replay()
+            if self._metrics_task:
+                self._metrics_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._metrics_task
+        finally:
+            self.stop_recording()
 
     # -- the one path in ------------------------------------------------------------------
 
@@ -322,17 +328,30 @@ class Hub:
         return state
 
     async def stop_replay(self) -> None:
+        """Tear the replay down. Never raises: every caller is a cleanup path.
+
+        The two-second wait is a backstop, not the mechanism — `Replayer.stop()` interrupts the
+        pump directly. If it were ever to expire, `wait_for` cancels the task and raises
+        TimeoutError, and letting that out is worse than the stall it reports: `stop_replay` is
+        what `Hub.stop()` calls first, so an exception here skips closing the recorder, and the
+        session is left with no `ended_at` — marked active forever, which the UI reads as "still
+        recording" and refuses to replay or delete.
+        """
         if self.replayer is None:
             return
         self.replayer.stop()
-        if self._replay_task is not None:
-            with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.wait_for(self._replay_task, timeout=2.0)
-        self.replayer = None
-        self._replay_task = None
-        for state in self.nodes.values():
-            state.reset()
-        self.broadcast({"type": "replay", "replay": None})
+        try:
+            if self._replay_task is not None:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.wait_for(self._replay_task, timeout=2.0)
+        except TimeoutError:
+            log.warning("replay task did not stop within 2 s; cancelled it and moved on")
+        finally:
+            self.replayer = None
+            self._replay_task = None
+            for state in self.nodes.values():
+                state.reset()
+            self.broadcast({"type": "replay", "replay": None})
 
     def _replay_sink(self, datagram: bytes, received_at: float) -> None:
         self.handle_datagram(datagram, received_at, replay=True)

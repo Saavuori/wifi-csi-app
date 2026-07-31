@@ -626,3 +626,51 @@ async def test_snapshot_describes_the_running_system(settings):
     assert snapshot["layout"]["name"] == "HT20"
     assert snapshot["counters"]["live_frames"] == 10
     assert snapshot["config"]["breathing"]["window_s"] > 0
+
+
+async def _recording_with_a_gap(settings, gap_us: int = 30_000_000):
+    """A recording whose two frames are `gap_us` apart, so replaying it means a long sleep."""
+    store = SessionStore(settings.recordings_dir)
+    session = store.create("overnight")
+    recorder = Recorder(store, session)
+    raw = datagrams(2)
+    for i, blob in enumerate(raw):
+        frame = parse_frame(blob)
+        frame.timestamp = i * gap_us
+        recorder.write(encode_frame(frame), frame)
+    recorder.close()
+    return session
+
+
+async def test_stopping_a_replay_mid_gap_does_not_wait_for_the_gap(settings):
+    """A recording is not obliged to be continuous, and a stop must not sit through a hole."""
+    session = await _recording_with_a_gap(settings)
+    hub = Hub(settings)
+    await hub.start_replay(session.id, speed=1.0)
+    await asyncio.sleep(0.1)  # the first frame goes out, then the pump waits out the gap
+
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    await hub.stop_replay()
+    assert loop.time() - start < 1.0, "stop must interrupt the wait, not ride it out"
+    assert hub.replayer is None
+    await hub.stop()
+
+
+async def test_a_slow_replay_stop_still_closes_the_recording(settings):
+    """`Hub.stop()` calls `stop_replay` first. If that can raise, the recorder is never closed
+    and the session is left with no `ended_at` — permanently 'active' in the session list."""
+    session = await _recording_with_a_gap(settings)
+    hub = Hub(settings)
+    hub.start_recording("live")
+    live = hub.recorder.session
+    await hub.start_replay(session.id, speed=1.0)
+    await asyncio.sleep(0.1)
+
+    # Force the backstop to be the thing that fires, by taking the interrupt away.
+    hub.replayer.stop = lambda: None
+
+    await hub.stop()
+    assert hub.replayer is None
+    assert live.ended_at is not None, "the recording must be closed even if the replay stalls"
+    assert live.as_dict()["active"] is False
