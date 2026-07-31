@@ -2,18 +2,21 @@
 
 Two independent binary formats, plus one file container. All little-endian.
 
-- **Uplink** — node → server, UDP. This is the format the plan calls "v1".
+- **Uplink** — node → server, UDP. Currently v2; v1 is still parsed.
 - **Downlink** — server → browser, WebSocket binary frames.
 - **Recording** — length-prefixed uplink datagrams on disk.
 
-A single canonical definition lives in four places that must stay in sync:
+The uplink definition lives in three places that must stay in sync — one per kind of node, plus
+the server that parses them all:
 
 | Language | File | Pinned by |
 |---|---|---|
-| C (firmware) | `firmware/main/csi_wire.h` | `firmware/scripts/run_host_tests.sh` |
+| C (ESP32 firmware) | `firmware/main/csi_wire.h` | `firmware/scripts/run_host_tests.sh` |
 | Python (server) | `server/csi/protocol.py` | `server/tests/test_protocol.py` |
-| TypeScript (browser) | `web/src/lib/protocol.ts` | `server/tests/test_protocol.py` |
 | Python (Pi node) | `pi/csi_node.py` | `pi/tests/test_csi_node.py` |
+
+The browser never sees an uplink datagram — it gets the downlink format below, defined in
+`server/csi/downlink.py` and `web/src/lib/protocol.ts`.
 
 `server/tests/test_protocol.py` pins the byte layout so drift is caught by CI rather than by a
 silent parse failure at 100 Hz. The Pi node's copy is pinned differently and more strongly: its
@@ -27,7 +30,7 @@ disagree about the layout without a test failing.
 ```
 offset size field        type   notes
 0      2    magic        u16    0x4353. On the wire (LE) the bytes read 53 43.
-2      1    version      u8     1
+2      1    version      u8     2
 3      1    node_id      u8     1..254; 0 and 255 reserved
 4      4    seq          u32    monotonic per node, wraps at 2^32
 8      8    timestamp    u64    esp_timer_get_time(), microseconds since boot
@@ -36,11 +39,38 @@ offset size field        type   notes
 18     1    channel      u8     primary channel, 1..14
 19     1    sec_channel  u8     0=none 1=above 2=below
 20     2    n_sub        u16    number of subcarriers in this frame
-22     ...  data         i8[]   2 * n_sub bytes, interleaved (imag, real)
+--- v2 ends v1 here ---------------------------------------------------------
+22     6    src_mac      u8[6]  who transmitted this frame: the AP's BSSID for a station node,
+                                the peer node's MAC for the ESP32 pair
+28     1    link_epoch   u8     increments on every association on the node
+29     1    reserved     u8     zero
+30     ...  data         i8[]   2 * n_sub bytes, interleaved (imag, real)
 ```
 
-Header is 22 bytes, `#pragma pack(1)`-equivalent — no padding anywhere. A HT20 frame with
-64 subcarriers is `22 + 128 = 150` bytes, so at 100 Hz a node emits ~15 KB/s of payload.
+Header is 30 bytes, `#pragma pack(1)`-equivalent — no padding anywhere. A HT20 frame with
+64 subcarriers is `30 + 128 = 158` bytes, so at 100 Hz a node emits ~16 KB/s of payload.
+
+### Versions
+
+v1 was the same header without the last eight bytes. v2 **appends**, so every v1 field is at the
+offset it always was, and `parse_frame` handles both with one struct: a v1 datagram yields a zero
+`src_mac` and epoch 0.
+
+That is not politeness towards old firmware. The recorder stores raw datagrams and the replayer
+hands those exact bytes to this parser, so a version the parser has forgotten is a shelf of
+recordings that no longer open. Any future field goes on the end for the same reason.
+
+### What link_epoch is for
+
+A single node joined to a mesh network can be steered from one access point to another at any
+time. The sequence numbers stay continuous and the device clock keeps running, so nothing else
+in the frame changes — but the far end of the measured link has moved to a different room, and
+every baseline built from the old one is now describing geometry that does not exist. The epoch
+is the only thing that says so. `nodes.py` treats a change in it exactly as it treats a reboot:
+throw the node's history away.
+
+Setting `CSI_LOCK_BSSID` in the firmware prevents the roam in the first place; the epoch is what
+tells you whether the lock is holding.
 
 `n_sub` is explicit and per-frame. Nothing downstream may assume 64. HT20 gives 64, HT40 gives
 128, and a Raspberry Pi running Nexmon on an 80 MHz channel sends 256. The subcarrier layout
@@ -48,24 +78,33 @@ tables in `server/csi/dsp/subcarriers.py` are keyed on `n_sub`.
 
 ### Two kinds of producer
 
-The header is written by an ESP32 (`firmware/`) or by a Pi running Nexmon (`pi/`). The fields
-mean the same thing either way, but three of them are *synthesized* on the Pi rather than read
-from the radio, and it is worth knowing which:
+The header is written by an ESP32 (`firmware/`) or by a Pi running Nexmon (`pi/`). Both are
+stations probing an access point, so the fields mean the same thing either way — but on the Pi
+several are *synthesized* rather than read from the radio, and it is worth knowing which:
 
 | Field | ESP32 | Pi |
 |---|---|---|
 | `timestamp` | `esp_timer_get_time()`, in the CSI callback | kernel receive timestamp (`SO_TIMESTAMPNS`) |
 | `seq` | incremented per CSI callback | minted per forwarded frame; the 802.11 sequence number is *not* used |
 | `rssi` | `wifi_pkt_rx_ctrl_t` | the driver's estimate from `/proc/net/wireless`, sampled at 1 Hz |
+| `noise_floor` | `wifi_pkt_rx_ctrl_t` | usually unavailable; sent as 0 |
+| `src_mac` | the associated BSSID | read from the nexmon packet |
+| `link_epoch` | incremented on association | incremented when the transmitter or chanspec changes |
 | `data` | `memcpy` of the driver's int8 buffer | int16 scaled per frame into int8 |
 
 The Pi's `seq` is deliberately not the one Nexmon reports: that is the transmitter's 802.11
 sequence number, 12 bits wide, and it wraps every 4096 frames. Forwarded as-is, a wrap reads
 as a reboot roughly every 41 seconds at 100 Hz.
 
-There is no `link_epoch` in v1, so the Pi signals a roam or an AP channel switch by restarting
-both its clock and its counter — which is exactly how a node reboot presents, and the server
-already answers a reboot by dropping the node's history. See `pi/README.md`.
+Nexmon has no notion of an epoch, but it reports the transmitter and the chanspec of every
+frame, and a change in either is exactly what the epoch exists to signal — a roam, a reconnect,
+or the access point changing channel. The Pi's clock and counter stay monotonic across one, so
+the server sees a roam rather than a roam *and* a reboot. See `pi/README.md`.
+
+The Pi's amplitude is scaled per frame, which discards absolute gain. That costs less than it
+sounds — `preprocess.py` divides by the frame's own RMS in both default normalization modes —
+but it does mean the AGC step detector cannot fire on a Pi frame, because the step was removed
+before the server saw it.
 
 ### Why (imag, real) and not (real, imag)
 

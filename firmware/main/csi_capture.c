@@ -15,6 +15,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "csi_settings.h"
 #include "csi_wire.h"
 
 static const char *TAG = "csi.capture";
@@ -22,9 +23,13 @@ static const char *TAG = "csi.capture";
 static csi_ring_t *s_ring;
 static csi_capture_stats_t s_stats;
 static uint32_t s_seq;
-static bool s_filter_enabled;
+static volatile bool s_filter_enabled;
 static uint8_t s_peer[6];
+static volatile uint8_t s_link_epoch;
 static TaskHandle_t s_consumer;
+// Cached at start rather than read through csi_settings() per frame. The callback is the one
+// place in this firmware where a pointer chase is worth avoiding on principle.
+static uint8_t s_node_id;
 
 // A scratch buffer owned by the callback. It is only ever touched from the WiFi task, so it
 // needs no protection, and it saves building the frame on the stack of a task whose stack size
@@ -38,11 +43,19 @@ void csi_capture_set_peer(const uint8_t mac[6]) {
         s_filter_enabled = false;
         return;
     }
+    // Disable, copy, re-enable. This runs from the event task while the callback may be reading
+    // s_peer, and the ordering decides what a race costs: with the flag cleared first, a frame
+    // arriving mid-copy is accepted rather than compared against half of one MAC and half of
+    // another. Accepting one frame too many is harmless; rejecting every frame after a roam
+    // because the comparison tore is not.
+    s_filter_enabled = false;
     memcpy(s_peer, mac, 6);
     s_filter_enabled = true;
     ESP_LOGI(TAG, "filtering CSI to %02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2],
              mac[3], mac[4], mac[5]);
 }
+
+void csi_capture_set_link_epoch(uint8_t epoch) { s_link_epoch = epoch; }
 
 static void IRAM_ATTR csi_callback(void *ctx, wifi_csi_info_t *info) {
     (void)ctx;
@@ -65,7 +78,7 @@ static void IRAM_ATTR csi_callback(void *ctx, wifi_csi_info_t *info) {
     csi_wire_header_t *header = (csi_wire_header_t *)s_scratch;
     header->magic = CSI_WIRE_MAGIC;
     header->version = CSI_WIRE_VERSION;
-    header->node_id = CONFIG_CSI_NODE_ID;
+    header->node_id = s_node_id;
     // Sequence advances once per frame we accept, whether or not the ring has room. That is
     // deliberate: a frame dropped on the device then shows up at the server as a gap, which is
     // exactly what the loss statistic should be counting.
@@ -78,6 +91,9 @@ static void IRAM_ATTR csi_callback(void *ctx, wifi_csi_info_t *info) {
     header->channel = info->rx_ctrl.channel;
     header->sec_channel = info->rx_ctrl.secondary_channel;
     header->n_sub = n_sub;
+    memcpy(header->src_mac, info->mac, 6);
+    header->link_epoch = s_link_epoch;
+    header->reserved = 0;
 
     memcpy(s_scratch + sizeof(csi_wire_header_t), info->buf, info->len);
 
@@ -97,6 +113,7 @@ esp_err_t csi_capture_start(csi_ring_t *ring) {
     s_ring = ring;
     memset(&s_stats, 0, sizeof(s_stats));
     s_seq = 0;
+    s_node_id = csi_settings()->node_id;
 
     // Fields below are the ESP32/S3 CSI configuration (IDF 5.x). Legacy long training field
     // only: it gives 64 subcarriers in HT20 and is present on every frame, where HT-LTF only
@@ -121,7 +138,7 @@ esp_err_t csi_capture_start(csi_ring_t *ring) {
     ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(csi_callback, NULL));
     ESP_ERROR_CHECK(esp_wifi_set_csi(true));
 
-    ESP_LOGI(TAG, "CSI capture enabled (node %d)", CONFIG_CSI_NODE_ID);
+    ESP_LOGI(TAG, "CSI capture enabled (node %u)", (unsigned)s_node_id);
     return ESP_OK;
 }
 

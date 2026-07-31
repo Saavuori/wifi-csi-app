@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 # The server is a dependency of the test run, not of the node itself.
+from csi import protocol
 from csi.nodes import NodeHealth
 from csi.protocol import parse_frame
 from csi_node import (
@@ -179,6 +180,8 @@ def test_datagram_parses_with_the_servers_own_parser():
         channel=36,
         sec_channel=csi_node.SEC_CHANNEL_ABOVE,
         data=quantize(csi),
+        src_mac=AP_MAC,
+        link_epoch=3,
     )
 
     frame = parse_frame(datagram)
@@ -190,6 +193,15 @@ def test_datagram_parses_with_the_servers_own_parser():
     assert frame.channel == 36
     assert frame.n_sub == 256
     assert frame.data.size == 512
+    assert frame.src_mac == AP_MAC
+    assert frame.link_epoch == 3
+
+
+def test_the_node_emits_the_current_wire_version():
+    """A version the server does not expect is rejected one warning per datagram, so this is
+    worth asserting rather than assuming."""
+    assert csi_node.WIRE_VERSION == protocol.VERSION
+    assert csi_node._WIRE_HEADER.size == protocol.HEADER_SIZE
 
 
 def test_amplitude_survives_the_round_trip():
@@ -278,9 +290,10 @@ def test_a_clean_run_shows_no_gaps_and_no_reboots():
     assert health.loss_rate == 0.0
 
 
-def test_a_roam_presents_as_a_reboot_so_the_server_drops_its_baseline():
-    """Wire v1 has no link_epoch. Restarting the clock is how a node reboot presents, and the
-    server responds to that by clearing history — which is exactly what a roam requires."""
+def test_a_roam_bumps_the_epoch_so_the_server_drops_its_baseline():
+    """A roam moves the far end of the measured link into a different room. link_epoch is the
+    only thing in the frame that says so, and nodes.py treats it exactly as it treats a
+    reboot."""
     node = Node(node_id=20)
     health = NodeHealth(node_id=20)
     other_ap = bytes.fromhex("aabbccddeeff")
@@ -291,13 +304,37 @@ def test_a_roam_presents_as_a_reboot_so_the_server_drops_its_baseline():
         )
         assert health.observe(parse_frame(datagram), now=1000.0 + i * 0.01) is False
 
-    # Same instant on the capture clock; only the link has changed.
     moved = node.on_packet(
         parse_nexmon(nexmon_packet(sample_csi(), src_mac=other_ap)), capture_us=50 * 10_000
     )
-    assert health.observe(parse_frame(moved), now=1000.5) is True
+    frame = parse_frame(moved)
+    assert frame.link_epoch == 1
+    assert frame.src_mac == other_ap
+    assert health.observe(frame, now=1000.5) is True
     assert node.link_changes == 1
-    assert health.reboots == 1
+    # A roam, not a reboot: reporting both for one event would double-count it, and the clock
+    # and counter are what distinguish them.
+    assert health.reboots == 0
+    assert frame.seq == 50
+    assert frame.timestamp == 500_000
+
+
+def test_the_epoch_only_moves_when_the_link_does():
+    node = Node(node_id=20)
+    epochs = set()
+    for i in range(30):
+        datagram = node.on_packet(
+            parse_nexmon(nexmon_packet(sample_csi(), seq=i)), capture_us=i * 10_000
+        )
+        epochs.add(parse_frame(datagram).link_epoch)
+    assert epochs == {0}
+
+
+def test_the_transmitter_reaches_the_frame():
+    """src_mac is the one v2 field a nexmon packet answers directly."""
+    node = Node(node_id=20)
+    frame = parse_frame(node.on_packet(parse_nexmon(nexmon_packet(sample_csi())), 0))
+    assert frame.src_mac == AP_MAC
 
 
 def test_a_channel_switch_also_counts_as_a_new_link():

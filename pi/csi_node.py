@@ -6,7 +6,12 @@ firmware to hand CSI to the host as UDP broadcasts on port 5500; this turns thos
 `docs/wire-format.md` uplink datagrams the server already ingests, so nothing downstream knows
 it is looking at a Pi.
 
-Four fields the wire format needs are not in a nexmon packet, and each is handled here:
+The node is a station probing its access point, which is the same topology the ESP32 firmware
+uses — and for the same reason. An associated radio is only handed CSI for frames addressed to
+it, so a node that only listens samples whenever the network happens to talk to it. Generating
+the traffic is what makes the rate a property of the node.
+
+Some of what the wire format carries is not in a nexmon packet, and each gap is handled here:
 
   seq        nexmon reports the *802.11* sequence number of the frame that triggered the
              capture. That is 12 bits, wraps every 4096 frames, and belongs to the
@@ -21,6 +26,10 @@ Four fields the wire format needs are not in a nexmon packet, and each is handle
              happens to be exactly what the server wants — its hybrid normalization only uses
              RSSI through a 30-second EMA (see server/csi/dsp/preprocess.py).
   channel    decoded from the chanspec in the packet.
+  link_epoch nexmon has no notion of one, but it reports the transmitter and the chanspec of
+             every frame, and a change in either is exactly what the epoch exists to signal.
+
+src_mac is the one v2 field that arrives for free: it is in every nexmon packet.
 
 This file is a fourth mirror of the uplink header, alongside firmware/main/csi_wire.h,
 server/csi/protocol.py and web/src/lib/protocol.ts. pi/tests/test_csi_node.py round-trips
@@ -45,9 +54,12 @@ log = logging.getLogger("csi.pi")
 # -- the uplink wire format (mirror of server/csi/protocol.py) ---------------------------
 
 WIRE_MAGIC = 0x4353
-WIRE_VERSION = 1
-_WIRE_HEADER = struct.Struct("<HBBIQbbBBH")
-assert _WIRE_HEADER.size == 22
+WIRE_VERSION = 2
+# v2: v1's 22 bytes, then src_mac, link_epoch and one reserved byte. Both of the appended
+# fields are ones a nexmon packet can actually answer — src_mac is in every packet, and the
+# epoch is what a change of transmitter or chanspec means.
+_WIRE_HEADER = struct.Struct("<HBBIQbbBBH6sBB")
+assert _WIRE_HEADER.size == 30
 
 SEC_CHANNEL_NONE = 0
 SEC_CHANNEL_ABOVE = 1
@@ -205,6 +217,8 @@ def encode_uplink(
     channel: int,
     sec_channel: int,
     data: np.ndarray,
+    src_mac: bytes = b"\x00" * 6,
+    link_epoch: int = 0,
 ) -> bytes:
     """Build one uplink datagram. `data` is int8, length 2*n_sub."""
     n_sub = data.size // 2
@@ -219,6 +233,9 @@ def encode_uplink(
         channel & 0xFF,
         sec_channel & 0xFF,
         n_sub,
+        src_mac[:6].ljust(6, b"\x00"),
+        link_epoch & 0xFF,
+        0,
     )
     return header + data.tobytes()
 
@@ -463,28 +480,28 @@ class Node:
         link = (pkt.src_mac, pkt.chanspec)
         if self._link is not None and link != self._link:
             # Roam, reconnect or a channel switch by the access point. Every baseline built on
-            # the old link is now wrong. Wire v1 has no field to say so, but restarting the
-            # clock and the counter is precisely how a node reboot presents, and the server
-            # already responds to that by dropping the node's history — which is the behaviour
-            # we want. See hub.py's reboot handling.
+            # the old link describes a room that is no longer the one being measured, so the
+            # epoch goes up and `nodes.py` throws the node's history away — the same response
+            # it gives a reboot.
+            #
+            # Only the epoch changes. The clock and the counter stay monotonic, because a node
+            # that also restarted those would be reporting a reboot *and* a roam for one event.
             self.link_changes += 1
+            self.epoch = (self.epoch + 1) & 0xFF
             log.info(
-                "link changed (%s ch%d -> %s ch%d); restarting the stream",
+                "link changed (%s ch%d -> %s ch%d); epoch now %d",
                 _fmt_mac(self._link[0]),
                 chanspec_channel(self._link[1]),
                 _fmt_mac(pkt.src_mac),
                 chanspec_channel(pkt.chanspec),
+                self.epoch,
             )
-            self.seq = 0
-            self._t0_us = None
-            self.epoch += 1
         self._link = link
 
         if self._t0_us is None:
             self._t0_us = capture_us
-        # Device time counts from the start of this link, mirroring esp_timer_get_time()
-        # counting from boot. Never negative: a timestamp that went backwards would be read as
-        # yet another reboot.
+        # Device time counts from the first frame, mirroring esp_timer_get_time() counting from
+        # boot. Never negative: a timestamp that went backwards would be read as a reboot.
         elapsed = max(0, capture_us - self._t0_us)
 
         datagram = encode_uplink(
@@ -496,6 +513,10 @@ class Node:
             channel=chanspec_channel(pkt.chanspec),
             sec_channel=chanspec_sec_channel(pkt.chanspec),
             data=quantize(pkt.csi),
+            # The one v2 field nexmon answers directly: the transmitter of the frame this
+            # measurement came from, which for an associated Pi is the access point.
+            src_mac=pkt.src_mac,
+            link_epoch=self.epoch,
         )
         self.seq += 1
         self.frames += 1

@@ -33,7 +33,9 @@ const nodeSelect = el("select", {
   },
 });
 const connectionDot = el("span", { class: "dot dot-bad" });
-const connectionLabel = el("span", {}, "connecting");
+// Classed so the phone layout can drop the word and keep the dot, which carries the same
+// information in a fifth of the width.
+const connectionLabel = el("span", { class: "connection-text" }, "connecting");
 const rateLabel = el("span", { class: "header-metric" }, "");
 const sourceLabel = el("span", { class: "header-source" }, "");
 
@@ -50,7 +52,12 @@ function show(id: string) {
   active = view;
 
   for (const button of nav.querySelectorAll("button")) {
-    button.classList.toggle("nav-active", button.dataset.view === id);
+    const isActive = button.dataset.view === id;
+    button.classList.toggle("nav-active", isActive);
+    // On a phone the sidebar is a horizontally scrolling tab bar, so the selected view can sit
+    // off-screen — which reads as nothing having happened. `block: "nearest"` keeps this from
+    // scrolling the page itself on the desktop, where the bar does not scroll at all.
+    if (isActive) button.scrollIntoView({ inline: "center", block: "nearest" });
   }
   // The hash is the whole router. Views are cheap to construct and the app has no other state
   // worth encoding, so anything more would be machinery for its own sake.
@@ -99,7 +106,12 @@ function renderSource(recording: Session | null, replay: ReplayState | null) {
 const header = el(
   "header",
   { class: "header" },
-  el("div", { class: "brand" }, el("span", { class: "brand-mark" }, "CSI"), "WiFi sensing"),
+  el(
+    "div",
+    { class: "brand" },
+    el("span", { class: "brand-mark" }, "CSI"),
+    el("span", { class: "brand-text" }, "WiFi sensing"),
+  ),
   el("div", { class: "spacer" }),
   sourceLabel,
   rateLabel,

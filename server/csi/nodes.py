@@ -38,6 +38,7 @@ class NodeHealth:
     missing: int = 0
     reorders: int = 0
     reboots: int = 0
+    roams: int = 0  # link epoch changes: the node re-associated, possibly to a different AP
     bad_packets: int = 0
 
     last_seq: int | None = None
@@ -46,17 +47,23 @@ class NodeHealth:
     noise_floor: int = 0
     channel: int = 0
     n_sub: int = 0
+    src_mac: bytes = b"\x00" * 6
+    link_epoch: int = 0
 
     # Recent (device timestamp) intervals, for a rate estimate that does not depend on the
     # server's clock or on the network.
     _intervals: deque = field(default_factory=lambda: deque(maxlen=256), repr=False)
 
     def observe(self, frame: Frame, *, now: float | None = None) -> bool:
-        """Fold in one frame. Returns True if the node appears to have rebooted.
+        """Fold in one frame. Returns True if the node's history must be thrown away.
 
-        A reboot resets both the sequence counter and `esp_timer_get_time()`, so the caller must
-        drop the node's history — carrying a pre-reboot window across the discontinuity would
-        put a step change into every analysis at once.
+        Two things force that. A reboot resets both the sequence counter and
+        `esp_timer_get_time()`, so a window carried across it puts a step change into every
+        analysis at once. A link epoch change means the node re-associated — on a mesh network,
+        possibly to a different access point — which moves the transmitting antenna and makes
+        every baseline built from the old link wrong, with nothing in the amplitudes to say so.
+        The second is the more insidious of the two, because unlike a reboot it leaves the
+        sequence numbers perfectly continuous.
         """
         self.last_seen = now if now is not None else time.time()
         self.frames += 1
@@ -64,6 +71,12 @@ class NodeHealth:
         self.noise_floor = frame.noise_floor
         self.channel = frame.channel
         self.n_sub = frame.n_sub
+        self.src_mac = frame.src_mac
+
+        roamed = self.frames > 1 and frame.link_epoch != self.link_epoch
+        if roamed:
+            self.roams += 1
+        self.link_epoch = frame.link_epoch
 
         rebooted = False
         prev = self.last_seq
@@ -76,12 +89,14 @@ class NodeHealth:
                 self.reboots += 1
             elif delta == 0:
                 # Duplicate. A reorder, not a gap: retransmission at the network level is not a
-                # capture problem and must not show up in the loss rate.
+                # capture problem and must not show up in the loss rate. Still reports a roam if
+                # this was the frame that carried the new epoch — the alternative is to swallow
+                # it here and never see it again, because the epoch has already been recorded.
                 self.reorders += 1
-                return False
+                return roamed
             elif delta > SEQ_MODULUS - REORDER_TOLERANCE:
                 self.reorders += 1
-                return False
+                return roamed
             else:
                 self.expected += delta
                 if delta > 1:
@@ -90,8 +105,9 @@ class NodeHealth:
         else:
             self.expected += 1
 
-        if not rebooted and self.last_timestamp and frame.timestamp > self.last_timestamp:
-            self._intervals.append(frame.timestamp - self.last_timestamp)
+        if not rebooted and not roamed and self.last_timestamp:
+            if frame.timestamp > self.last_timestamp:
+                self._intervals.append(frame.timestamp - self.last_timestamp)
 
         self.last_seq = frame.seq
         self.last_timestamp = frame.timestamp
@@ -99,7 +115,11 @@ class NodeHealth:
         if rebooted:
             self._intervals.clear()
             self.expected += 1
-        return rebooted
+        if roamed:
+            # The interval spanning a re-association is the length of the outage, not a sample
+            # period. Left in, one roam drags the reported rate down for the next 256 frames.
+            self._intervals.clear()
+        return rebooted or roamed
 
     @property
     def rate_hz(self) -> float:
@@ -144,6 +164,9 @@ class NodeHealth:
             "loss_rate": round(self.loss_rate, 5),
             "reorders": self.reorders,
             "reboots": self.reboots,
+            "roams": self.roams,
+            "src_mac": self.src_mac.hex(":") if any(self.src_mac) else "",
+            "link_epoch": self.link_epoch,
             "bad_packets": self.bad_packets,
             "rssi": self.rssi,
             "noise_floor": self.noise_floor,

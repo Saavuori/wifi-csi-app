@@ -64,16 +64,18 @@ the reply.
 10 Hz is not useless. Breathing sits at 0.1–0.5 Hz and is comfortably sampled there, so
 `--probe-hz 0` is a real option if you would rather not add traffic. Heart rate is not.
 
-A roam, or a channel switch by the AP, ends the capture. The node notices — the transmitter
-MAC or the chanspec changes — and restarts its stream, which the server reads as a node reboot
-and responds to by dropping the node's history. That is the correct response: every baseline
-built on the old link is measuring a different room.
+A roam, or a channel switch by the AP, ends the capture. The node notices — the transmitter MAC
+or the chanspec changes — and increments `link_epoch`, which the server answers by dropping the
+node's history. That is the correct response: every baseline built on the old link is measuring
+a different room. The clock and the sequence counter stay monotonic across it, so the server
+records a roam rather than a roam *and* a reboot.
 
-## The four fields nexmon does not give us
+## What nexmon does not give us
 
-A nexmon packet is 16 bytes of header and then interleaved int16 CSI. Four things the uplink
-format needs are not in it, and each is worth knowing about because each is a place where a
-wrong answer would look like data rather than like a fault.
+A nexmon packet is 16 bytes of header and then interleaved int16 CSI. `src_mac` arrives for
+free — it is in every packet. The rest of what the uplink format needs is synthesized here, and
+each is worth knowing about because each is a place where a wrong answer would look like data
+rather than like a fault.
 
 **Sequence numbers are minted, not copied.** nexmon reports the *802.11* sequence number of
 the frame that triggered the capture. That is 12 bits, it wraps every 4096 frames, and it
@@ -91,6 +93,10 @@ worse answer than the ESP32 gives.
 associated we can read the driver's own estimate from `/proc/net/wireless`, once a second.
 That sounds too slow to matter and is not: the server's hybrid normalization only uses RSSI
 through a 30-second EMA, so a per-frame value would buy nothing.
+
+**`link_epoch` is inferred from the packets.** nexmon has no notion of an association, but it
+reports the transmitter and the chanspec of every frame, and a change in either is exactly what
+the epoch exists to signal. That is the roam handling described above.
 
 **Amplitude is scaled per frame.** nexmon gives int16 per component; the wire carries int8.
 The node scales each frame so its largest component lands near full scale. Absolute gain is
@@ -145,7 +151,7 @@ settings without restarting the service.
 python -m pytest pi/tests -q
 ```
 
-No Pi required: the tests build synthetic nexmon packets, push them through the node, and
-parse the result with the *server's* protocol module. That last part is the point — the node
-holds a fourth copy of the uplink header, alongside the C, Python and TypeScript ones, and
-this is what stops it drifting from the other three.
+No Pi required: the tests build synthetic nexmon packets, push them through the node, and parse
+the result with the *server's* protocol module. That last part is the point — the node holds a
+third copy of the uplink header, alongside the ESP32's C and the server's Python, and this is
+what stops it drifting from the other two.

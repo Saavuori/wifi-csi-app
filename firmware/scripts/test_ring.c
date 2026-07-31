@@ -74,7 +74,7 @@ static void *consumer(void *arg) {
 static void test_wire_layout(void) {
     // The layout the server parses. Getting this wrong is the single most expensive mistake
     // available here: it produces plausible-looking garbage rather than an error.
-    assert(sizeof(csi_wire_header_t) == 22);
+    assert(sizeof(csi_wire_header_t) == 30);
 
     csi_wire_header_t header;
     uint8_t *raw = (uint8_t *)&header;
@@ -90,9 +90,12 @@ static void test_wire_layout(void) {
     header.channel = 6;
     header.sec_channel = 0;
     header.n_sub = 64;
+    memcpy(header.src_mac, "\xAA\xBB\xCC\xDD\xEE\xFF", 6);
+    header.link_epoch = 7;
+    header.reserved = 0;
 
     assert(raw[0] == 0x53 && raw[1] == 0x43);  // 0x4353 little-endian
-    assert(raw[2] == 1);
+    assert(raw[2] == 2);
     assert(raw[3] == 3);
     assert(raw[4] == 0xEF && raw[7] == 0xDE);
     assert(raw[8] == 0x08 && raw[15] == 0x01);
@@ -102,7 +105,13 @@ static void test_wire_layout(void) {
     assert(raw[19] == 0);
     assert(raw[20] == 64 && raw[21] == 0);
 
-    printf("wire layout: 22 bytes, offsets match the spec\n");
+    // v2's additions. Everything above is at the offset v1 put it at, which is what lets the
+    // server parse both versions with one struct and keeps old recordings replayable.
+    assert(raw[22] == 0xAA && raw[27] == 0xFF);
+    assert(raw[28] == 7);
+    assert(raw[29] == 0);
+
+    printf("wire layout: 30 bytes, offsets match the spec (v1's 22 unchanged)\n");
 }
 
 static void test_ring_basics(void) {

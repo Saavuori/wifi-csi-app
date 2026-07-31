@@ -2,7 +2,11 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- viewport-fit=cover so the bottom tab bar can pad itself past the home indicator with
+         env(safe-area-inset-*). Zoom is deliberately not disabled: the waterfall is exactly the
+         kind of thing you want to pinch into. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="mobile-web-app-capable" content="yes" />
     <meta name="color-scheme" content="dark" />
     <title>CSI</title>
     <link rel="icon" href="data:," />

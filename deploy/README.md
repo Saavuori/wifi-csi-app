@@ -77,6 +77,10 @@ no authentication on it — anything that can reach it can inject frames. On a h
 fine; over the open internet it is not, and the answer is a tunnel rather than adding a shared
 secret to a device with no operator.
 
+Only add `-e CSI_ECHO_PORT=5568 -p 5568:5568/udp` if a node is built with `CSI_PROBE_UDP_ECHO`
+— i.e. its router will not answer pings and it needs something that will. It is off by default
+because it reflects whatever it is sent, and an unnecessary reflector on the LAN is not free.
+
 ## Caddy
 
 ```caddyfile

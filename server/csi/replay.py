@@ -18,7 +18,7 @@ import time
 from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 
-from .protocol import HEADER_SIZE, REC_MAGIC, ProtocolError
+from .protocol import HEADER_SIZE_V1, REC_MAGIC, ProtocolError
 from .recorder import read_index
 
 Sink = Callable[[bytes, float], Awaitable[None] | None]
@@ -203,7 +203,12 @@ def _records_from(fp, offset: int) -> Iterator[bytes]:
 
 
 def _peek_timestamp(datagram: bytes) -> int | None:
-    """Read the device timestamp without building a Frame — replay does this per record."""
-    if len(datagram) < HEADER_SIZE:
+    """Read the device timestamp without building a Frame — replay does this per record.
+
+    Bounded by the *v1* header size on purpose: the timestamp sits at the same offset in every
+    version, and a recording made before v2 existed is exactly the thing replay has to keep
+    working on.
+    """
+    if len(datagram) < HEADER_SIZE_V1:
         return None
     return int.from_bytes(datagram[_TIMESTAMP_AT : _TIMESTAMP_AT + 8], "little")
