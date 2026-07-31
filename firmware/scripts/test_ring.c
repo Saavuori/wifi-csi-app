@@ -114,6 +114,30 @@ static void test_wire_layout(void) {
     printf("wire layout: 30 bytes, offsets match the spec (v1's 22 unchanged)\n");
 }
 
+static void test_a_slot_holds_the_largest_frame(void) {
+    // These two constants live in different headers and have to be re-derived by hand whenever
+    // the header grows. They were not: v2 appended eight bytes and CSI_SLOT_BYTES stayed at
+    // 512 + the v1 header, eight short of the frame it claims to hold. Nothing overflows —
+    // csi_capture.c checks the size before the memcpy — so the symptom is every wide frame
+    // silently counted as `oversize` and dropped, with no other counter out of place.
+    _Static_assert(CSI_SLOT_BYTES >= CSI_WIRE_MAX_FRAME_BYTES,
+                   "a ring slot must hold the largest frame this firmware can emit");
+
+    uint8_t widest[CSI_WIRE_MAX_FRAME_BYTES];
+    csi_ring_init(&g_ring);
+    fill(widest, sizeof(widest), 11);
+    assert(csi_ring_push(&g_ring, widest, sizeof(widest)));
+    assert(csi_ring_dropped(&g_ring) == 0);
+
+    const csi_slot_t *slot = csi_ring_peek(&g_ring);
+    assert(slot != NULL && slot->len == sizeof(widest));
+    assert(memcmp(slot->data, widest, sizeof(widest)) == 0);
+    csi_ring_pop_done(&g_ring);
+
+    printf("slot size: holds a %u-subcarrier frame (%u bytes)\n", (unsigned)CSI_MAX_SUBCARRIERS,
+           (unsigned)CSI_WIRE_MAX_FRAME_BYTES);
+}
+
 static void test_ring_basics(void) {
     csi_ring_init(&g_ring);
     assert(csi_ring_peek(&g_ring) == NULL);
@@ -177,6 +201,7 @@ static void test_concurrent(void) {
 
 int main(void) {
     test_wire_layout();
+    test_a_slot_holds_the_largest_frame();
     test_ring_basics();
     test_drop_on_full();
     test_concurrent();
