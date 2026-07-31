@@ -21,7 +21,21 @@ just producers into that format. Nothing downstream knows or cares which it is l
 | `server/` | Python: UDP ingest, recorder, replayer, DSP, HTTP + WebSocket. |
 | `web/` | TypeScript + canvas front end. No framework. |
 | `docs/` | Wire formats. |
-| `deploy/` | Container and reverse-proxy configuration. |
+| `deploy/` | Container, compose and reverse-proxy configuration. |
+
+## Quick start, on a Raspberry Pi
+
+64-bit Raspberry Pi OS on a Pi 4 or 5:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Saavuori/wifi-csi-app/main/install.sh | bash
+```
+
+That installs Docker if it is missing, tunes the one kernel setting that matters for UDP
+ingest, starts the server, and starts a synthetic node alongside it — so the waterfall moves
+and the breathing view converges on a known answer without any hardware. Then open
+`http://<pi>:8080`. Pass `--no-demo` when you have boards to point at it instead, and
+`--uninstall` to remove it. Details and the compose file are in [`deploy/README.md`](deploy/README.md).
 
 ## Quick start, without hardware
 
@@ -124,6 +138,9 @@ pipeline rather than by reading it:
 firmware/scripts/run_host_tests.sh           # ring buffer + wire layout, no hardware needed
 cd web && npm run build                      # typecheck + bundle
 ```
+
+All three run in CI on every push, and the container image is built for amd64 and arm64 only
+after they pass — see [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 ## Configuration
 
