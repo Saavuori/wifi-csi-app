@@ -12,6 +12,11 @@ managed_components/
 sdkconfig
 sdkconfig.old
 
+# The Pages workflow copies these out of docs/ at publish time, and the local-preview command
+# in that workflow's header does the same by hand. One copy of each image, in docs/, where the
+# README links it.
+site/screenshot-*.png
+
 # The WiFi password for the local build, and the sdkconfig fragment gen_local_config.py
 # writes from it. Both hold the password in plaintext and their own headers say they are
 # gitignored; make it true. Unanchored, so they stay ignored wherever the script is run from.
