@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import bisect
+import contextlib
 import struct
 import time
 from collections.abc import Awaitable, Callable, Iterator
@@ -63,6 +64,9 @@ class Replayer:
         self._stop = False
         self._resume = asyncio.Event()
         self._resume.set()
+        # Set whenever something wants the pump's attention while it is waiting for a frame to
+        # fall due. See `_sleep_until_due`.
+        self._wake = asyncio.Event()
 
     # -- controls ------------------------------------------------------------------------
 
@@ -85,10 +89,12 @@ class Replayer:
     def seek(self, t_us: int) -> None:
         self._seek_to = int(t_us)
         self._resume.set()
+        self._wake.set()
 
     def stop(self) -> None:
         self._stop = True
         self._resume.set()
+        self._wake.set()
 
     def state(self) -> dict:
         return {
@@ -161,7 +167,9 @@ class Replayer:
                     due = wall_start + (t_us - base_t_us) / 1e6 / self.speed
                     delay = due - time.monotonic()
                     if delay > _SLEEP_FLOOR_S:
-                        await asyncio.sleep(delay)
+                        await self._sleep_until_due(delay)
+                        if self._stop or self._seek_to is not None:
+                            return
                 elif self.frames_sent % 512 == 0:
                     # Full-speed replay must still yield, or the event loop starves and the
                     # clients watching the replay never receive any of it.
@@ -173,6 +181,22 @@ class Replayer:
                 result = self.sink(datagram, time.time())
                 if result is not None:
                     await result
+
+    async def _sleep_until_due(self, delay: float) -> None:
+        """Wait for a frame to fall due, or for stop/seek — whichever comes first.
+
+        A plain sleep here is a promise the recording is not obliged to keep. Nothing says the
+        frames are evenly spaced: a node that was off for a minute leaves a minute-long hole,
+        and replaying it means sleeping through the whole thing. A `stop()` arriving in that
+        window would not be noticed until the far side of the gap, long past the two seconds the
+        hub is willing to wait before it gives up — so the stop path has to be able to reach into
+        the wait rather than only being seen between frames.
+        """
+        self._wake.clear()
+        if self._stop or self._seek_to is not None:
+            return
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self._wake.wait(), delay)
 
     def _offset_for(self, t_us: int) -> int:
         """Byte offset of the last indexed frame at or before `t_us`. 0 if there is no index."""
