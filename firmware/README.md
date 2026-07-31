@@ -1,6 +1,15 @@
 # CSI node firmware
 
-ESP-IDF 5.x, ESP32-S3. Two roles from one image, selected in `menuconfig`.
+ESP-IDF 5.x. Three roles from one image, selected in `menuconfig`. The default is `STATION`: one
+board, joined to the WiFi you already have.
+
+Targets ESP32-S3 by default and the original ESP32 via `sdkconfig.defaults.esp32`. Nothing in the
+C is target-specific — the CSI configuration struct, the dual-core pinning and the lwIP affinity
+all exist on both — so the port is flash geometry and a target line, not code.
+
+Once the node has been set up once, **the settings live on the device, not in the image**. SSID,
+password, BSSID lock, server address, node id and probe rate are all editable from a web page the
+node serves itself; `menuconfig` supplies the values a freshly flashed board starts with.
 
 ## The rules this firmware exists to obey
 
@@ -22,7 +31,7 @@ has a comment at the code that implements it; they are collected here so the lis
    Server arrival time is never used for anything frequency-domain — the jitter would destroy
    the analysis. (`csi_capture.c`)
 
-4. **Binary wire format, never JSON.** At 100 Hz and ~150 bytes a frame this is ~15 KB/s; on-chip
+4. **Binary wire format, never JSON.** At 100 Hz and ~158 bytes a frame this is ~16 KB/s; on-chip
    JSON encoding would fall over. (`csi_wire.h`)
 
 5. **UDP, not WebSocket.** No reconnect logic on the device, and a dropped frame is survivable —
@@ -32,27 +41,118 @@ has a comment at the code that implements it; they are collected here so the lis
    becomes bursts. Burst-sampled data is useless for spectral analysis no matter how good the
    timestamps are. (`csi_wifi.c`, `sdkconfig.defaults`)
 
+7. **The probe is paced against an absolute deadline.** `vTaskDelayUntil`, not `vTaskDelay`, so
+   a slow send costs one late probe rather than shifting every subsequent one. Rate stability is
+   the only reason the prober exists. (`csi_probe.c`)
+
+8. **Every association is counted and travels in the frame.** A mesh network can move the node
+   to a different access point without breaking anything the sequence numbers or the device
+   clock would notice. `link_epoch` is what lets the server notice. (`csi_wifi.c`, `csi_wire.h`)
+
 ## Topology
 
-The plan's option B, an ESP32 pair, is the default and the one to start with:
+One board, station mode, joined to the access point you already have:
 
 ```
-  [TX node] ---- 100 Hz UDP broadcast ----> (air)
-       |                                      |
-       +--- AP ---+                    [RX node] promiscuous, filters on TX's MAC,
-                  |                        computes nothing, forwards CSI
-                  |                             |
-                  +--------- LAN ---------------+---> server:5566/udp
+   [AP] ---- ICMP echo reply, 100 Hz ----> [node]  CSI callback on each reply
+     ^                                        |
+     +------- ICMP echo request --------------+
+                                              |
+                            same association ---> server:5566/udp
 ```
 
-Both boards join the same access point, which is what gives the receiver a route to the server.
-The receiver listens promiscuously and filters on the transmitter's MAC, so what it measures is
-the direct TX→RX link through the room — not the access point's link, which would not move when
-you move the node.
+The node provokes its own downlink stream. It pings the gateway at a fixed rate and reports CSI
+for each reply, so the link it measures is AP→node — the packets are transmitted by the access
+point, and what modulates them is whatever is between the AP and the board.
 
-Option A (one node in station mode, harvesting CSI from router traffic) works too: flash a
-single receiver and set `CSI_PEER_MAC` to your router's BSSID. You give up control of the
-packet rate, which is why it is not the default.
+That is the whole trick, and it is why one board is enough. A station that only listens gets a
+CSI callback whenever the AP happens to address it, which on an idle network is a few frames a
+second; the spectrum you compute from that is a spectrum of the household's traffic pattern.
+
+**What you give up compared to the pair.** The rate is a request, not a fact. If the channel is
+busy or the router rate-limits ICMP, some probes go unanswered and the stream has holes in it.
+The statistics log reports the yield, the server refuses to estimate a breathing rate across a
+hole rather than interpolating one into existence, and the node health view shows both. If the
+yield turns out to be persistently poor, that is when a second board earns its place.
+
+### On a mesh network
+
+Several access points share one SSID, and the mesh decides which one you are on. It can change
+its mind at any time.
+
+That matters more here than it would for a normal client. A roam moves the far end of the link
+to a different room: the presence detector's 30 s calibration, the baseline it drifts, and the
+subcarrier ranking are all now describing geometry that does not exist, and nothing in the
+amplitudes says anything happened.
+
+So:
+
+1. Boot once with `CSI_LOCK_BSSID` empty and read the scan log. It lists every access point on
+   your SSID with its channel and RSSI — which the phone apps for Eero, Nest and Deco do not
+   show you at all.
+2. Pick one and set `CSI_LOCK_BSSID` to it. This is a real decision, not a formality: the line
+   between that AP and the node is the line the system senses along, so the useful AP is the one
+   that puts a doorway, a bed, or a hallway on that line. Not necessarily the strongest.
+3. Flash, and watch `roams` on the node health view. It should stay at zero. A steering attempt
+   against a locked station becomes a brief disconnect and a reconnect to the same AP — visible
+   and counted, rather than silent.
+
+Two more things these networks will do to you:
+
+- **Guest SSIDs and client isolation** stop the node reaching the server at all. Put it on the
+  main network.
+- **WPA2/WPA3 transitional with PMF** is the common default. The firmware advertises PMF-capable
+  for this reason; without it some systems refuse the join in a way that looks exactly like a
+  wrong password.
+
+Band steering needs no thought — the ESP32-S3 is 2.4 GHz only, so there is nothing to steer it
+to.
+
+### The ESP32 pair, if you add a second board
+
+`RECEIVER` + `TRANSMITTER` is the plan's topology B. The transmitter emits a datagram at a fixed
+rate and the receiver listens promiscuously, filtered to the transmitter's MAC, so the measured
+link is TX→RX through the room and the rate is entirely yours. Set `CSI_PEER_MAC` on the
+receiver to the transmitter's MAC, which the transmitter prints at boot.
+
+## The setup page
+
+The BSSID lock is the one setting you cannot know before the node has been somewhere: it is
+chosen by reading a scan from where the board actually sits, and choosing again is the normal way
+to move the sensing line to a different doorway. Compiling it in makes that a rebuild-and-reflash
+cycle, needing a toolchain, a cable and the download-mode dance, for a value the device itself is
+best placed to offer a menu of.
+
+So the node serves a settings page, in two places:
+
+- **On your network, at the node's own address**, printed at boot as `setup page at http://…`.
+  This is the everyday one, and it runs while the node goes on measuring.
+- **On a setup network of its own** (`csi-setup-xxxxxx`, at `http://192.168.4.1`) when the node
+  cannot reach your network at all. This is the recovery path.
+
+Hit **Scan** and the page lists every access point in range with BSSID, channel and RSSI;
+clicking a row fills in the SSID and the lock together. **Save and restart** writes to NVS, and
+the values survive reflashing as long as the flash is not erased.
+
+Three ways into the recovery portal, in the order they are checked:
+
+1. **The setup button held for half a second after boot.** Press it *after* the board is up, not
+   through the reset: on the usual DevKit boards this is GPIO0, which the ROM bootloader reads
+   first and would take into serial download mode instead. The window is three seconds and the
+   log says when it opens.
+2. **A stored configuration that cannot work** — an unset or malformed server address.
+3. **A join that fails** after the full retry budget: a changed password, a vanished access
+   point, or a board still carrying the placeholder SSID.
+
+A board flashed with real values in `menuconfig` boots straight into measuring. The portal is for
+boards that have nothing usable, not a step to confirm what was just compiled in.
+
+Leaving the page running costs one task blocked on a listening socket and about 12 KB of heap. It
+is in neither the CSI callback nor the packer, and it is pinned to Core 1 below the sender and
+the prober, so a request arriving mid-capture waits for them rather than the other way round.
+Measured on hardware, serving the page and running a scan through it cost no frames. It has no
+authentication — anyone on your network can read the settings, minus the WiFi password, and
+change them. `CSI_PORTAL_IN_STATION` turns it off.
 
 ## Build
 
@@ -61,22 +161,48 @@ packet rate, which is why it is not the default.
 cd firmware
 
 idf.py set-target esp32s3
-idf.py menuconfig      # CSI node -> role, SSID, server address, peer MAC
+idf.py menuconfig      # CSI node -> role, SSID, server address, BSSID lock
 idf.py build flash monitor
 ```
 
-Configure the transmitter first, note its MAC from the boot log, then set that as
-`CSI_PEER_MAC` on the receiver.
+On the original ESP32, the extra defaults file carries the target and the 4 MB flash layout:
+
+```sh
+idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32" set-target esp32
+idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32" build flash monitor
+```
+
+`scripts/gen_local_config.py` writes a `sdkconfig.local` fragment from a WiFi password kept in
+`wifi.local.txt`, so the password reaches the build without passing through a shell history or a
+terminal scrollback. Both files are gitignored:
+
+```sh
+echo "PASSWORD=..." > wifi.local.txt
+python scripts/gen_local_config.py --ssid "my-net" --server 192.168.0.10 --probe udp \
+    --bssid aa:bb:cc:dd:ee:ff
+```
+
+**Reflashing keeps the saved settings** as long as the flash is not erased: `write_flash` only
+erases the sectors it writes, and the partition table's sector ends below NVS. `erase_flash` or
+`--erase-all` sends the node back to the compiled-in values.
 
 ### Settings that matter
 
+All of these are starting values. Anything saved from the setup page wins until the flash is
+erased.
+
 | Setting | Default | Why |
 |---|---|---|
+| `CSI_LOCK_BSSID` | empty | The mesh setting. Empty means the network may move the node between access points mid-session, which invalidates every baseline without saying so |
 | `CSI_NODE_ID` | 1 | Distinct per board, or the server interleaves two rooms into one history |
 | `CSI_SERVER_HOST` | — | An address, not a hostname; DNS is one more thing to fail unattended |
-| `CSI_PEER_MAC` | empty | Empty captures from every station on the channel — fine for a smoke test, wrong after that |
-| `CSI_TX_RATE_HZ` | 100 | Target 80–100 Hz; well above Nyquist for the ~2 Hz cardiac band |
-| `CONFIG_FREERTOS_HZ` | 1000 | At the 10 ms default the transmit period rounds and the rate is quietly wrong |
+| `CSI_PROBE_RATE_HZ` | 100 | Target 80–100 Hz; well above Nyquist for the ~2 Hz cardiac band. ~6 KB/s each way, continuously |
+| `CSI_PROBE_METHOD` | ICMP | Ping the gateway. Switch to UDP echo if the yield is poor and the reply counter says the router is not answering |
+| `CSI_PEER_MAC` | empty | Receiver role only. Empty captures from every station on the channel — fine for a smoke test, wrong after that |
+| `CONFIG_FREERTOS_HZ` | 1000 | At the 10 ms default the probe period rounds and the rate is quietly wrong |
+
+If you pick `CSI_PROBE_UDP_ECHO`, the server needs `CSI_ECHO_PORT` set to match — it does not
+open that port otherwise.
 
 ## Host tests
 
@@ -96,19 +222,68 @@ Every 10 seconds:
 
 ```
 I (30245) csi: 79.9 Hz | sent 799 | ring drop 0 | filtered 0 | oversize 0 | queued 0 | send errors 0 | heap 214532
+I (30245) csi: link f0:9f:c2:11:22:33 epoch 1 | probes 1000 | replies 998 | yield 80% | probe errors 0 | disconnects 0
 ```
 
 Against Phase 1's exit criteria:
 
-- **rate** should sit within a percent or two of `CSI_TX_RATE_HZ`
+- **rate** should sit within a percent or two of `CSI_PROBE_RATE_HZ`
 - **ring drop** is frames the callback could not place because the sender fell behind. Non-zero
   here means something is blocking on Core 1 — check lwIP's affinity first
 - **queued** creeping upwards is the same problem, earlier
 - **filtered** counts frames from other stations; it should be large and is not a fault
 - **send errors** are usually the network, not the node
 
+The station role's second line is about the link rather than the board:
+
+- **yield** is CSI frames over probes, and it is the headline number for a single node. Under
+  100% means the access point did not answer every probe. Some of that is unavoidable on a
+  shared channel; a yield that collapses is worth chasing.
+- **replies** separates the two ways yield can fall. Replies arriving *without* CSI frames means
+  the capture configuration is wrong, not the network. Replies not arriving means the router is
+  not answering — try `CSI_PROBE_UDP_ECHO`, which the server answers unconditionally.
+- **epoch** must not move. Each increment is a re-association, and on a mesh that means you may
+  now be measuring a different room. If it climbs, the BSSID lock is not set or is not holding.
+- **disconnects** climbing with a stable epoch is the lock doing its job — the network tried to
+  steer the node and it came back to the same access point.
+
 The `sequence gaps under 1%` criterion is measured at the server, on the Node health view, which
 counts device-side drops and in-flight losses together — which is what you actually care about.
+
+## Measured on hardware
+
+First run on a real board: an ESP32-D0WDQ6 (4 MB, CP210x) against a TP-Link Deco M9 mesh, ESP-IDF
+v5.3.2.
+
+| | |
+|---|---|
+| Rate | 96–99 Hz, 3.7 ms jitter |
+| Sequence gaps | 0.00%, zero gaps over 96k frames |
+| Probe yield | 96–100% |
+| Ring drops / send errors | 0 / 0 |
+| Roams | 0 with the BSSID lock set |
+| SNR | 47 dB at −47 dBm on the near access point |
+
+Three things that only showed up with a radio attached:
+
+- **The mesh steered the node between access points across a reboot** — −45 dBm and 45 dB SNR on
+  one boot, −82 dBm and 13 dB on the next, same SSID, same channel, with nothing in the data to
+  say the far end of the link had moved to another room. `CSI_LOCK_BSSID` is not optional on a
+  mesh; it is the difference between a baseline that means something and one that does not.
+- **The router stopped answering ICMP** after sustained probing at 100 Hz, taking the yield to 0%
+  while still answering a laptop at 4 Hz. `CSI_PROBE_UDP_ECHO` restored it to 96%, and the yield
+  is exact there because both ends are ours. Expect to need it on consumer mesh hardware.
+- **`app_main`'s default 3584-byte stack is not enough** once the boot scan's results array and
+  the settings validation are both on it. Raised to 8192 in `sdkconfig.defaults`; the failure was
+  a boot loop with `A stack overflow in task main`, not a subtle one.
+
+Two lines in `sdkconfig.defaults` were also found to be doing nothing: `CONFIG_ESP_WIFI_TASK_CORE_ID_0`
+and `CONFIG_ESP_WIFI_PS_NONE` are not symbols in IDF 5.x, and a defaults file only warns about a
+name it does not recognise. The behaviour was right anyway — core 0 is the IDF default, and power
+save is turned off by the `esp_wifi_set_ps()` call in `csi_wifi.c`, which the boot log confirms
+with `wifi:Set ps type: 0` — but the file was claiming credit it had not earned. The first is
+fixed to `CONFIG_ESP_WIFI_TASK_PINNED_TO_CORE_0`; the second is now a comment pointing at the code
+that actually enforces it.
 
 ## Deferred
 

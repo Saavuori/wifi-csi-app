@@ -2,16 +2,25 @@ menu "CSI node"
 
     choice CSI_ROLE
         prompt "Node role"
-        default CSI_ROLE_RECEIVER
+        default CSI_ROLE_STATION
         help
-            The plan's topology B uses one of each: a transmitter putting frames in the air at
-            a fixed rate, and a receiver measuring them. Flash one board as each.
+            STATION is the single-board topology and the one to start with: the node joins your
+            existing WiFi, provokes a steady downlink stream from the access point, and reports
+            CSI for it. One board, no second radio to place or power.
+
+            RECEIVER and TRANSMITTER are the two halves of the ESP32 pair. The pair gives a link
+            you fully own — you choose both endpoints and the rate is not shared with the rest of
+            the house — at the cost of a second board. Only reach for it if the station role's
+            reply yield turns out to be too poor.
+
+        config CSI_ROLE_STATION
+            bool "Station (single node: joins your WiFi, probes it, reports CSI)"
 
         config CSI_ROLE_RECEIVER
-            bool "Receiver (captures CSI, sends it to the server)"
+            bool "Receiver (promiscuous; measures a second ESP32's transmissions)"
 
         config CSI_ROLE_TRANSMITTER
-            bool "Transmitter (emits frames at a fixed rate)"
+            bool "Transmitter (the second board of the pair)"
     endchoice
 
     config CSI_NODE_ID
@@ -23,6 +32,9 @@ menu "CSI node"
             the server will interleave two rooms into a single history.
 
     menu "WiFi"
+        comment "These are starting values. Once anything has been saved from the setup"
+        comment "page, the stored settings win and these are only used again after an erase."
+
         config CSI_WIFI_SSID
             string "SSID"
             default "csi-net"
@@ -34,11 +46,38 @@ menu "CSI node"
         config CSI_WIFI_MAX_RETRY
             int "Reconnect attempts before giving up"
             default 20
+
+        config CSI_LOCK_BSSID
+            string "Lock to this BSSID (aa:bb:cc:dd:ee:ff)"
+            default ""
+            help
+                The setting that makes a mesh network usable for sensing. Empty means the node
+                associates with whichever access point advertising the SSID it likes best, and a
+                mesh system is free to steer it to a different one at any time. A roam changes
+                the transmitting antenna, and therefore the geometry, and therefore every
+                baseline the server has built — silently, with no error anywhere.
+
+                Set it and the node associates with exactly that access point and never roams.
+                A steering attempt then becomes a brief disconnect and a reconnect to the same
+                AP: visible, countable, and correctly treated as a discontinuity by the server.
+
+                The boot scan below prints the BSSIDs to choose from. Which one you pick is a
+                real decision — the line between that AP and this node is the line the system
+                senses along.
+
+        config CSI_SCAN_ON_BOOT
+            bool "Scan and log every AP on the SSID at boot"
+            default y
+            help
+                Consumer mesh apps do not show you BSSIDs, so this log is usually the only way
+                to find out which access points exist and how strong each one is from where the
+                node sits. Costs a few seconds at boot.
     endmenu
 
-    menu "Receiver"
-        depends on CSI_ROLE_RECEIVER
-
+    # Deliberately not `depends on` the role. csi_net.c is compiled into every image and reads
+    # CSI_SENDER_PRIORITY unconditionally, so hiding these behind a role choice makes the
+    # transmitter build fail on an undefined symbol rather than merely hiding a setting.
+    menu "Uplink"
         config CSI_SERVER_HOST
             string "Server IPv4 address"
             default "192.168.1.10"
@@ -50,6 +89,81 @@ menu "CSI node"
             int "Server UDP port"
             default 5566
 
+        config CSI_SENDER_PRIORITY
+            int "Sender task priority"
+            default 6
+            help
+                Above the default application priority so a frame does not sit in the ring
+                behind unrelated work, and below the WiFi driver's so it cannot starve it.
+    endmenu
+
+    menu "Probe"
+        depends on CSI_ROLE_STATION
+
+        choice CSI_PROBE_METHOD
+            prompt "Probe method"
+            default CSI_PROBE_ICMP
+            help
+                A station that only listens gets CSI at whatever rate the access point happens
+                to talk to it, which on an idle network is a few frames a second. The node has
+                to provoke its own downlink stream; every reply it draws is one CSI sample.
+
+            config CSI_PROBE_ICMP
+                bool "ICMP echo to the gateway"
+                help
+                    One hop, no configuration, and the lowest jitter available — the reply's
+                    last leg is your access point transmitting to you, which is exactly the link
+                    being measured. Some routers rate-limit ICMP; that shows up as a low reply
+                    yield in the statistics log rather than as a mystery.
+
+            config CSI_PROBE_UDP_ECHO
+                bool "UDP echo through the CSI server"
+                help
+                    The node sends a small datagram to the server's echo port and the server
+                    bounces it back. Immune to router ICMP policy and the yield is exact because
+                    we own both ends, at the cost of one extra LAN round trip of jitter. Needs
+                    the server reachable from the node.
+        endchoice
+
+        config CSI_PROBE_TARGET
+            string "Probe target IPv4 address"
+            default ""
+            depends on CSI_PROBE_ICMP
+            help
+                Empty means the DHCP gateway, which is what you want: it is one hop away and
+                requires no configuration. Set it only to probe something else on the LAN.
+
+                Wherever the target physically sits, the last hop of the reply is always the
+                access point this node is associated with — so this measures the AP-to-node link
+                by construction.
+
+        config CSI_ECHO_PORT
+            int "Server echo port"
+            default 5568
+            depends on CSI_PROBE_UDP_ECHO
+
+        config CSI_PROBE_RATE_HZ
+            int "Probe rate (Hz)"
+            range 1 500
+            default 100
+            help
+                Target ~80-100 Hz: far above Nyquist for the ~2 Hz cardiac band, with headroom
+                for decimation. At 100 Hz this is roughly 6 KB/s each way, continuously, which
+                is nothing for a router but is worth knowing about. Needs CONFIG_FREERTOS_HZ
+                high enough that the period is a whole number of ticks — sdkconfig.defaults
+                sets 1000.
+
+        config CSI_PROBE_PRIORITY
+            int "Prober task priority"
+            default 5
+            help
+                Below the sender's. A late probe costs one sample; a late CSI frame costs a
+                queue that never drains.
+    endmenu
+
+    menu "Receiver"
+        depends on CSI_ROLE_RECEIVER
+
         config CSI_PEER_MAC
             string "Transmitter MAC to filter on"
             default ""
@@ -57,13 +171,6 @@ menu "CSI node"
                 Only report CSI for frames from this source. Leave empty to capture from every
                 station on the channel, which is useful for a first smoke test and misleading
                 for anything else — the rate becomes whatever the neighbours are doing.
-
-        config CSI_SENDER_PRIORITY
-            int "Sender task priority"
-            default 6
-            help
-                Above the default application priority so a frame does not sit in the ring
-                behind unrelated work, and below the WiFi driver's so it cannot starve it.
     endmenu
 
     menu "Transmitter"
@@ -88,6 +195,65 @@ menu "CSI node"
                 Target ~80-100 Hz. That is far above Nyquist for the ~2 Hz cardiac band and
                 leaves headroom for decimation. Needs CONFIG_FREERTOS_HZ high enough that the
                 period is a whole number of ticks — sdkconfig.defaults sets 1000.
+    endmenu
+
+    menu "Setup portal"
+        comment "A SoftAP and a web page for setting the SSID, the BSSID lock and the server"
+        comment "address without a rebuild. Runs instead of capture, never alongside it."
+
+        config CSI_PORTAL_IN_STATION
+            bool "Also serve the setup page while capturing"
+            default y
+            help
+                Keeps the same page reachable at the node's own address on your network, so
+                changing the access point does not need a button press or a cable.
+
+                Idle it is one task blocked on a listening socket and about 12 KB of heap, and it
+                is in neither the CSI callback nor the packer. It is pinned to core 1 below the
+                sender and the prober, so a request that arrives mid-capture waits for them
+                rather than the other way round. Turn it off if you want the capture path to have
+                nothing on it at all, and use the button instead.
+
+                Note that it has no authentication: anyone on your network can read the node's
+                settings, minus the WiFi password, and change them.
+
+        config CSI_PORTAL_AP_PREFIX
+            string "Setup network name prefix"
+            default "csi-setup"
+            help
+                The last three octets of the board's MAC are appended, so two nodes being set up
+                in the same room are distinguishable without a serial console.
+
+        config CSI_PORTAL_AP_PASSWORD
+            string "Setup network password"
+            default ""
+            help
+                Under 8 characters means an open network, which is the default. The portal is
+                only reachable while the node is unconfigured or the boot button was held, and
+                an open network makes it obvious that this is a setup mode rather than something
+                left running. Set a password if the node is somewhere you would rather nobody
+                walked past and reconfigured.
+
+        config CSI_PORTAL_BUTTON_GPIO
+            int "Setup button GPIO"
+            default 0
+            help
+                Held low for half a second after boot, this forces the portal even when settings
+                are stored. It is the way back for a node configured onto a network that no
+                longer exists, where nothing over the air can reach it.
+
+                GPIO0 is the boot button on the usual DevKit boards. Note that it must be pressed
+                *after* the board starts, not held through the reset: the ROM bootloader reads
+                the same pin first and would stop in serial download mode instead.
+
+        config CSI_PORTAL_BUTTON_WINDOW_MS
+            int "How long to watch the setup button at boot (ms)"
+            default 3000
+            help
+                The window has to be long enough to press into by hand after the board comes up,
+                because holding the button through reset lands in the ROM bootloader rather than
+                here. Every boot waits this long before joining, so it trades a few seconds of
+                startup for a recovery path that does not need a cable.
     endmenu
 
     config CSI_REPORT_PERIOD_S

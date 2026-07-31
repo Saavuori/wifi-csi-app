@@ -11,6 +11,11 @@ export interface NodeHealth {
   loss_rate: number;
   reorders: number;
   reboots: number;
+  /** Re-associations. On a mesh, the count of times the node changed access point mid-session. */
+  roams: number;
+  /** MAC the frames were transmitted from: the access point's BSSID for a station node. */
+  src_mac: string;
+  link_epoch: number;
   bad_packets: number;
   rssi: number;
   noise_floor: number;
@@ -60,6 +65,13 @@ export interface Metrics {
   presence?: PresenceState;
   breathing?: VitalsState;
   heart?: VitalsState;
+  /**
+   * Why there is no estimate, when the reason is worth showing. Set when the analysis window
+   * had a hole in it big enough that interpolating across it would have invented a peak in the
+   * band being measured — a shared access point going quiet, not a fault in the node.
+   */
+  breathing_rejected?: string;
+  heart_rejected?: string;
   placement?: { breathing_snr_db: number; heart_snr_db: number };
   selection?: SelectionState;
   variance?: { subcarriers: number[]; values: number[]; agc_fraction: number };

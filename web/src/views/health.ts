@@ -14,6 +14,10 @@ import type { View } from "./view";
 function verdict(node: NodeHealth): { text: string; className: string } {
   if (!node.online) return { text: "offline", className: "bad" };
   if (node.loss_rate > 0.01) return { text: "losing frames", className: "bad" };
+  // Ranked above "slow" on purpose. A node that keeps changing access point is not producing a
+  // degraded measurement, it is producing a measurement of somewhere else every few minutes,
+  // and the fix (lock the BSSID) is different from the fix for a low rate.
+  if (node.roams > 0) return { text: "roaming", className: "warn" };
   if (node.rate_hz < 40) return { text: "slow", className: "warn" };
   if (node.jitter_ms > 5) return { text: "jittery", className: "warn" };
   return { text: "healthy", className: "good" };
@@ -71,7 +75,21 @@ export function healthView(): View {
             metric("uptime", formatDuration(node.uptime_s)),
             metric("reboots", String(node.reboots), node.reboots > 0 ? "warn" : ""),
             metric("reorders", String(node.reorders)),
+            metric("roams", String(node.roams), node.roams > 0 ? "warn" : ""),
           ),
+          ...(node.src_mac
+            ? [
+                el(
+                  "p",
+                  { class: "hint" },
+                  `link ${node.src_mac} · epoch ${node.link_epoch}` +
+                    (node.roams > 0
+                      ? " — this node has changed access point mid-session, which invalidates " +
+                        "the calibration each time. Set CSI_LOCK_BSSID in the firmware."
+                      : ""),
+                ),
+              ]
+            : []),
           el(
             "button",
             {

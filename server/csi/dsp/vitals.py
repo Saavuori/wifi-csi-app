@@ -56,6 +56,18 @@ class VitalsConfig:
     zero_pad: int = 8  # FFT length multiplier, for peak interpolation
     selection: SelectionConfig = field(default_factory=SelectionConfig)
 
+    # Coverage limits, checked against what `uniform_resample` had to invent.
+    #
+    # 0.5 s is the number that matters. Linear interpolation across a hole is a ramp, and a ramp
+    # lasting 0.5 s has its energy around 2 Hz and above — outside the respiration band and
+    # mostly harmless. Stretch it to a second or two and the fundamental slides down into
+    # 0.1-0.5 Hz, on top of the breathing peak, where it is indistinguishable from a breath.
+    #
+    # 0.2 is deliberately loose by comparison. Many small holes are the normal condition on a
+    # shared access point and they average out; one long one does not.
+    max_gap_s: float = 0.5
+    max_interpolated: float = 0.2
+
     @classmethod
     def breathing(cls) -> VitalsConfig:
         return cls(band=BREATHING_BAND, window_s=20.0)
@@ -103,9 +115,14 @@ class VitalsEstimator:
 
     def __init__(self, config: VitalsConfig | None = None) -> None:
         self.config = config or VitalsConfig.breathing()
+        # Why the last estimate declined to produce a number, for the UI to show instead of a
+        # stale value. Only the coverage rejection is worth naming: the others are ordinary
+        # not-enough-data-yet conditions that resolve on their own within a window.
+        self.last_rejection: str | None = None
 
     def estimate(self, history: History) -> VitalsResult | None:
         cfg = self.config
+        self.last_rejection = None
         window = history.seconds(cfg.window_s)
         # Require most of the requested window to actually be present. A 20 s window that is
         # really 6 s of data still produces a confident-looking peak, and it will be wrong.
@@ -121,11 +138,29 @@ class VitalsEstimator:
         if ranked.indices.size == 0:
             return None
 
-        series, fs = uniform_resample(window.t_us, window.amp[:, ranked.indices], ANALYSIS_FS)
+        series, fs, coverage = uniform_resample(
+            window.t_us, window.amp[:, ranked.indices], ANALYSIS_FS
+        )
         # Enough samples for the filter's padding and a little more. Deliberately permissive:
         # short windows give bad answers here, and the UI slider exists so that can be seen
         # rather than hidden behind a refusal to compute.
         if series.shape[0] < 2 * SG_WINDOW:
+            return None
+
+        # The one place where being permissive is wrong. A hole in the window is not a shortage
+        # of data that makes the answer noisy — the interpolator fills it with a straight line,
+        # and a ramp lasting a fraction of a second is *itself* energy in the respiration band.
+        # The estimate that comes out is confident and wrong, and nothing downstream can tell.
+        # This is the failure mode a node sharing an access point with the household has and a
+        # node measuring a dedicated transmitter does not, so it is checked here rather than
+        # being left to the rate statistic.
+        if not coverage.acceptable(
+            max_gap_s=cfg.max_gap_s, max_interpolated=cfg.max_interpolated
+        ):
+            self.last_rejection = (
+                f"link gaps: longest {coverage.max_gap_s:.2f} s, "
+                f"{coverage.interpolated * 100:.0f}% interpolated"
+            )
             return None
 
         filtered = bandpass(series, fs, cfg.band)

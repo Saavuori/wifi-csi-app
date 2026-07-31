@@ -39,6 +39,16 @@ body {
   display: flex;
   flex-direction: column;
   height: 100%;
+  /* Dynamic viewport height, so the bottom tab bar is not left underneath a mobile browser's
+     collapsing toolbar. Browsers without dvh keep the 100% above. */
+  height: 100dvh;
+}
+
+/* No 300 ms tap delay and no accidental double-tap zoom on things meant to be pressed. */
+button,
+.chip,
+input[type="range"] {
+  touch-action: manipulation;
 }
 
 /* -- header ------------------------------------------------------------------------------ */
@@ -681,4 +691,157 @@ input[type="range"] {
 .stat-label {
   font-size: 11px;
   color: var(--muted);
+}
+
+/* -- phones ------------------------------------------------------------------------------ */
+
+/* One app, not two. Everything below is layout and touch-target work on the same markup and the
+   same views: a phone gets the identical waterfall, the identical numbers and the identical
+   controls as the desktop. That matters more here than in most apps, because the reason to hold
+   this on a phone at all is that you are across the room moving the node, and the number you
+   walked over to read has to be the real one. */
+
+@media (max-width: 720px) {
+  /* The sidebar becomes a bottom tab bar. column-reverse does it without touching the markup:
+     the nav stays first in the DOM, and so first for a screen reader and for tab order, while
+     rendering underneath the content where a thumb can actually reach it. */
+  .layout {
+    flex-direction: column-reverse;
+  }
+
+  .nav {
+    flex-direction: row;
+    width: auto;
+    gap: 4px;
+    padding: 6px 8px;
+    padding-bottom: calc(6px + env(safe-area-inset-bottom));
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    border-right: none;
+    border-top: 1px solid var(--line);
+  }
+
+  .nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .nav-button {
+    white-space: nowrap;
+    padding: 9px 14px;
+    min-height: 42px;
+  }
+
+  /* The desktop marks the active tab down its left edge. On a bar at the bottom of the screen
+     that edge is the top one. */
+  .nav-active {
+    box-shadow: inset 0 2px 0 var(--accent);
+  }
+
+  .header {
+    gap: 10px;
+    padding: 8px 12px;
+    padding-top: calc(8px + env(safe-area-inset-top));
+  }
+
+  /* The mark alone is enough branding; the words are the first thing to go when the header has
+     to fit a node picker and a status dot on 360 px. */
+  .brand-text,
+  .connection-text {
+    display: none;
+  }
+
+  .content {
+    padding: 10px;
+  }
+
+  .view {
+    gap: 10px;
+  }
+
+  .panel {
+    padding: 12px;
+    gap: 10px;
+  }
+
+  /* The desktop minimums assume a window. In portrait, a plot tall enough to look good pushes
+     its own controls below the fold, and controls that are never scrolled to are controls that
+     do not exist. */
+  .panel-grow {
+    min-height: 300px;
+  }
+
+  .waterfall-frame {
+    min-height: 240px;
+  }
+
+  .plot-frame {
+    min-height: 180px;
+  }
+
+  .plot-short {
+    min-height: 120px;
+    flex: 0 0 120px;
+  }
+
+  .panel-tuner {
+    min-height: 220px;
+  }
+
+  /* The two headline numbers are the point of their views, so they scale with the viewport
+     rather than being capped — but they must not overflow it either. */
+  .bpm-value {
+    font-size: clamp(40px, 13vw, 56px);
+  }
+
+  .tuner-value {
+    font-size: clamp(60px, 23vw, 108px);
+  }
+
+  /* Four columns of statistics on a 360 px screen is four unreadable columns. */
+  .node-stats {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .node-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .session-main {
+    min-width: 0;
+  }
+
+  /* Touch targets. 42 px is about the smallest that can be hit without looking, which is the
+     relevant test for a page you are holding while watching a wall. */
+  .button,
+  .chip {
+    min-height: 42px;
+    padding: 10px 16px;
+  }
+
+  .node-select,
+  select,
+  input[type="text"] {
+    min-height: 42px;
+    padding: 8px 10px;
+    /* 16 px exactly: iOS Safari zooms the page when a focused input is any smaller, and the
+       zoom does not come back on blur. */
+    font-size: 16px;
+  }
+
+  input[type="range"] {
+    height: 34px;
+  }
+
+  .control-toggle input[type="checkbox"] {
+    width: 20px;
+    height: 20px;
+  }
+}
+
+/* Small phones: the frame rate is the least useful thing in the header and the first to go. */
+@media (max-width: 420px) {
+  .header-metric {
+    display: none;
+  }
 }

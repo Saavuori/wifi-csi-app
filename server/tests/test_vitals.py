@@ -11,7 +11,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from csi.dsp.preprocess import PreprocessConfig, Preprocessor
+from csi.dsp.util import uniform_resample
 from csi.dsp.vitals import VitalsConfig, VitalsEstimator, bandpass
+from csi.ring import FrameRing
+from csi.synth import Scene, SceneConfig
 
 
 def estimate(ring, window_s=20.0, **kwargs):
@@ -91,12 +95,80 @@ def test_confidence_is_independent_of_the_zero_padding_factor(build_ring):
 
 def test_survives_dropped_frames(build_ring):
     """UDP loses frames and the device drops them when its ring is full. The resampler exists
-    so that this costs accuracy rather than correctness."""
+    so that this costs accuracy rather than correctness.
+
+    Also the guard on the coverage check below: scattered single-frame losses are the normal
+    condition and must not trip it, or a station node on a busy home network would refuse to
+    report anything at all.
+    """
     ring, _ = build_ring(45.0, breathing_bpm=14.0, drop_rate=0.05)
-    result = estimate(ring)
+    estimator = VitalsEstimator(VitalsConfig.breathing())
+    result = estimator.estimate(ring)
 
     assert result is not None
+    assert estimator.last_rejection is None
     assert result.bpm == pytest.approx(14.0, abs=2.0)
+
+
+def _ring_with_an_outage(outage_s: float, duration_s: float = 45.0, bpm: float = 14.0):
+    """A scene with every frame missing for a contiguous stretch near the end of it.
+
+    This is what a shared access point does that a dedicated transmitter board does not: the
+    channel gets busy, the node's probes go unanswered for a second or two, and the stream has
+    a hole in it rather than a scattering of single losses.
+    """
+    config = SceneConfig(breathing_bpm=bpm)
+    scene = Scene(config)
+    pre = Preprocessor(PreprocessConfig(norm_mode="hybrid"))
+    ring = FrameRing(config.n_sub, int(duration_s * config.rate_hz * 1.2) + 64)
+
+    outage_start = duration_s - 10.0
+    for i in range(int(duration_s * config.rate_hz)):
+        frame = scene.next_frame()
+        if frame is None:
+            continue
+        if outage_start <= i / config.rate_hz < outage_start + outage_s:
+            continue
+        ring.push(pre.process(frame))
+    return ring
+
+
+def test_an_outage_is_refused_rather_than_interpolated_over(build_ring):
+    """The failure the coverage check exists to prevent.
+
+    `np.interp` cannot fail: hand it a two-second hole and it draws a straight line across,
+    returns an array of exactly the right length, and says nothing. That ramp is energy, and a
+    ramp lasting seconds has its fundamental sitting in the 0.1-0.5 Hz respiration band — so
+    the estimator produces a confident number that describes the network rather than the
+    person. Refusing, with a reason, is the correct output.
+    """
+    estimator = VitalsEstimator(VitalsConfig.breathing())
+    assert estimator.estimate(_ring_with_an_outage(2.0)) is None
+    assert estimator.last_rejection is not None
+    assert "link gaps" in estimator.last_rejection
+
+    # And the check is not simply always-on: the same scene without the hole answers correctly.
+    clean = VitalsEstimator(VitalsConfig.breathing())
+    result = clean.estimate(_ring_with_an_outage(0.0))
+    assert result is not None
+    assert result.bpm == pytest.approx(14.0, abs=2.0)
+
+
+def test_coverage_separates_jitter_from_holes():
+    """Coverage has to be indifferent to ordinary jitter and sharp about gaps, or it is either
+    useless or unusable."""
+    fs = 20.0
+    rng = np.random.default_rng(0)
+
+    jittered = np.cumsum(12_500 + rng.integers(-2000, 2000, size=800)).astype(np.int64)
+    _, _, coverage = uniform_resample(jittered, np.ones((800, 1)), fs)
+    assert coverage.max_gap_s < 0.05
+    assert coverage.interpolated == 0.0
+
+    holed = np.concatenate([jittered[:400], jittered[400:] + 2_000_000])
+    _, _, coverage = uniform_resample(holed, np.ones((800, 1)), fs)
+    assert coverage.max_gap_s == pytest.approx(2.0, abs=0.05)
+    assert 0.1 < coverage.interpolated < 0.4
 
 
 def test_agc_steps_do_not_move_the_answer(build_ring):

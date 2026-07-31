@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CSI node setup</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;padding:20px;background:#14161a;color:#e6e8ec;
+     font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+main{max-width:640px;margin:0 auto}
+h1{font-size:20px;margin:0 0 4px}
+p.sub{margin:0 0 24px;color:#8b93a1;font-size:13px}
+fieldset{border:1px solid #2a2f38;border-radius:8px;padding:16px;margin:0 0 16px}
+legend{padding:0 6px;color:#8b93a1;font-size:12px;text-transform:uppercase;letter-spacing:.06em}
+label{display:block;margin:0 0 12px}
+label span{display:block;font-size:13px;color:#b6bcc8;margin-bottom:4px}
+label em{font-style:normal;color:#7a8290;font-size:12px}
+input,select{width:100%;padding:8px 10px;border:1px solid #2a2f38;border-radius:6px;
+             background:#0f1115;color:#e6e8ec;font:inherit}
+input:focus,select:focus{outline:2px solid #3d7dff;outline-offset:-1px;border-color:transparent}
+.row{display:flex;gap:12px}
+.row label{flex:1}
+button{padding:9px 16px;border:0;border-radius:6px;background:#3d7dff;color:#fff;
+       font:inherit;font-weight:600;cursor:pointer}
+button.ghost{background:#2a2f38;color:#e6e8ec;font-weight:500}
+button:disabled{opacity:.5;cursor:default}
+.bar{display:flex;gap:10px;align-items:center;margin-top:4px}
+table{width:100%;border-collapse:collapse;font-size:13px;margin-top:4px}
+th{text-align:left;color:#7a8290;font-weight:500;padding:4px 6px;border-bottom:1px solid #2a2f38}
+td{padding:5px 6px;border-bottom:1px solid #1c2029}
+tr.pick{cursor:pointer}
+tr.pick:hover td{background:#1a1e26}
+tr.on td{background:#16233d}
+code{font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;color:#c8cfdb}
+.note{font-size:12px;color:#7a8290;margin:10px 0 0}
+#msg{margin-top:16px;padding:10px 12px;border-radius:6px;font-size:13px;display:none}
+#msg.err{display:block;background:#3a1d20;color:#ffb4b4}
+#msg.ok{display:block;background:#16301f;color:#a8e6b8}
+</style>
+</head>
+<body>
+<main>
+<h1>CSI node setup</h1>
+<p class="sub">Node <span id="who">?</span> &middot; settings are stored on the device and applied after a restart.</p>
+
+<form id="f">
+<fieldset>
+<legend>Network</legend>
+<label><span>SSID</span><input name="ssid" id="ssid" maxlength="32" required></label>
+<label><span>Password <em>&mdash; leave empty for an open network</em></span>
+  <input name="password" id="password" type="password" maxlength="64"
+         placeholder="unchanged"></label>
+
+<div class="bar">
+  <button type="button" class="ghost" id="scan">Scan</button>
+  <span class="note" id="scanmsg">Scan to list the access points and pick one to lock to.</span>
+</div>
+<table id="aps" hidden>
+  <thead><tr><th>BSSID</th><th>SSID</th><th>Ch</th><th>Signal</th></tr></thead>
+  <tbody></tbody>
+</table>
+
+<label style="margin-top:12px"><span>Lock to BSSID <em>&mdash; empty means the mesh may move this node between access points mid-session</em></span>
+  <input name="lock_bssid" id="lock_bssid" placeholder="aa:bb:cc:dd:ee:ff" maxlength="17"></label>
+<p class="note">The line between the chosen access point and this node is the line the system
+senses along, so the useful one is whichever puts a doorway, a bed or a hallway on that line &mdash;
+not necessarily the strongest.</p>
+</fieldset>
+
+<fieldset>
+<legend>Server</legend>
+<div class="row">
+  <label style="flex:2"><span>IPv4 address</span>
+    <input name="server_host" id="server_host" placeholder="192.168.0.10" required></label>
+  <label><span>Port</span><input name="server_port" id="server_port" type="number"
+         min="1" max="65535" required></label>
+</div>
+</fieldset>
+
+<fieldset>
+<legend>Capture</legend>
+<div class="row">
+  <label><span>Node ID <em>&mdash; 1&ndash;254</em></span>
+    <input name="node_id" id="node_id" type="number" min="1" max="254" required></label>
+  <label><span>Probe rate (Hz)</span>
+    <input name="probe_rate_hz" id="probe_rate_hz" type="number" min="1" max="500" required></label>
+</div>
+</fieldset>
+
+<div class="bar"><button type="submit" id="save">Save and restart</button></div>
+</form>
+
+<div id="msg"></div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const msg = (text, cls) => { const m = $("msg"); m.textContent = text; m.className = cls; };
+
+// The password is never sent to the browser. An empty field on submit therefore means "keep
+// what is stored", not "set an open network" — otherwise every visit to this page to change the
+// probe rate would silently wipe the WiFi password.
+let hasStoredPassword = false;
+
+fetch("/api/current").then(r => r.json()).then(c => {
+  $("who").textContent = c.node_id;
+  $("ssid").value = c.ssid;
+  $("lock_bssid").value = c.lock_bssid;
+  $("server_host").value = c.server_host;
+  $("server_port").value = c.server_port;
+  $("node_id").value = c.node_id;
+  $("probe_rate_hz").value = c.probe_rate_hz;
+  hasStoredPassword = c.has_password;
+  if (!hasStoredPassword) $("password").placeholder = "";
+}).catch(() => msg("could not read current settings from the node", "err"));
+
+$("scan").onclick = () => {
+  const btn = $("scan");
+  btn.disabled = true;
+  $("scanmsg").textContent = "scanning…";
+  fetch("/api/scan").then(r => r.json()).then(d => {
+    const body = $("aps").querySelector("tbody");
+    body.innerHTML = "";
+    for (const ap of d.aps) {
+      const tr = document.createElement("tr");
+      tr.className = "pick";
+      tr.innerHTML = `<td><code>${ap.bssid}</code></td><td>${ap.ssid || "&mdash;"}</td>` +
+                     `<td>${ap.channel}</td><td>${ap.rssi} dBm</td>`;
+      tr.onclick = () => {
+        for (const r of body.children) r.classList.remove("on");
+        tr.classList.add("on");
+        if (ap.ssid) $("ssid").value = ap.ssid;
+        $("lock_bssid").value = ap.bssid;
+      };
+      body.appendChild(tr);
+    }
+    $("aps").hidden = d.aps.length === 0;
+    $("scanmsg").textContent = d.aps.length
+      ? `${d.aps.length} access point(s) — click one to select it`
+      : "no access points found";
+    btn.disabled = false;
+  }).catch(() => { $("scanmsg").textContent = "scan failed"; btn.disabled = false; });
+};
+
+$("f").onsubmit = (ev) => {
+  ev.preventDefault();
+  const body = {
+    ssid: $("ssid").value.trim(),
+    lock_bssid: $("lock_bssid").value.trim(),
+    server_host: $("server_host").value.trim(),
+    server_port: +$("server_port").value,
+    node_id: +$("node_id").value,
+    probe_rate_hz: +$("probe_rate_hz").value,
+  };
+  const typed = $("password").value;
+  if (typed !== "" || !hasStoredPassword) body.password = typed;
+
+  $("save").disabled = true;
+  msg("saving…", "ok");
+  fetch("/api/save", {method: "POST", body: JSON.stringify(body)})
+    .then(r => r.json().then(j => ({ok: r.ok, j})))
+    .then(({ok, j}) => {
+      if (!ok) { msg(j.error || "save failed", "err"); $("save").disabled = false; return; }
+      msg("Saved. The node is restarting and will join " + body.ssid +
+          ". This page will stop responding — that is the setup network going away.", "ok");
+    })
+    .catch(() => { msg("save failed", "err"); $("save").disabled = false; });
+};
+</script>
+</body>
+</html>
