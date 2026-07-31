@@ -452,3 +452,29 @@ def test_icmp_echo_checksums_to_zero():
     """A correct checksum is the difference between the AP replying and ignoring us."""
     packet = csi_node.icmp_echo(0x1234, 7)
     assert csi_node.checksum(packet) == 0
+
+
+def test_timestamp_us_reads_a_32_bit_timespec():
+    """32-bit Raspberry Pi OS is the default image for every Pi that is not a 4 or a 5, and
+    SO_TIMESTAMPNS is the legacy option, so there the kernel hands back an 8-byte `timespec32`.
+    Demanding 16 bytes drops every kernel timestamp on the floor — and the fallback is a
+    userspace clock carrying this process's scheduling jitter, which is exactly the thing the
+    breathing estimator resamples on and cannot repair."""
+    import socket as s
+
+    anc = [(s.SOL_SOCKET, csi_node.SCM_TIMESTAMPNS, struct.pack("=ii", 1700, 250_000_000))]
+    assert timestamp_us(anc) == 1700 * 1_000_000 + 250_000
+
+
+def test_timestamp_us_reads_a_64_bit_timespec():
+    import socket as s
+
+    anc = [(s.SOL_SOCKET, csi_node.SCM_TIMESTAMPNS, struct.pack("=qq", 1700, 250_000_000))]
+    assert timestamp_us(anc) == 1700 * 1_000_000 + 250_000
+
+
+def test_timestamp_us_rejects_a_length_it_does_not_recognise():
+    import socket as s
+
+    anc = [(s.SOL_SOCKET, csi_node.SCM_TIMESTAMPNS, b"\x00" * 12)]
+    assert timestamp_us(anc) is None
