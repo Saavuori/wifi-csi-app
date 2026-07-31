@@ -1,0 +1,61 @@
+name: pages
+
+# Publishes site/ to GitHub Pages. Pages is configured to deploy from Actions rather than from
+# a branch, so this workflow is the only thing that updates the site.
+#
+# The screenshots live in docs/ because the README links them there, and are copied into the
+# artifact rather than duplicated in the repo — one copy, two consumers. To preview the page
+# locally, do the same copy by hand:
+#
+#     cp docs/screenshot-*.png site/ && python -m http.server -d site 8000
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "site/**"
+      - "docs/screenshot-*.png"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time, and never cancel one in flight: a half-published site is worse than
+# a stale one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: build and deploy
+    runs-on: ubuntu-latest
+    # Only the default branch publishes, resolved from the event rather than hardcoded so that
+    # renaming it does not silently stop the site from updating.
+    #
+    # Note this is the *default* branch, which is `main` — not whichever branch the open pull
+    # requests happen to target. If the site stops tracking the code, that gap is why, and the
+    # fix is to merge into the default branch rather than to widen this condition: the Pages
+    # environment's own deployment policy restricts it to the default branch anyway, so a run
+    # from anywhere else fails at the deploy step.
+    if: github.event_name == 'workflow_dispatch' || github.ref_name == github.event.repository.default_branch
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage the screenshots alongside the page
+        run: cp docs/screenshot-*.png site/
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deploy
+        uses: actions/deploy-pages@v4

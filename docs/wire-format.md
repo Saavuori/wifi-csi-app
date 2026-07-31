@@ -6,18 +6,22 @@ Two independent binary formats, plus one file container. All little-endian.
 - **Downlink** — server → browser, WebSocket binary frames.
 - **Recording** — length-prefixed uplink datagrams on disk.
 
-The uplink definition lives in two places that must stay in sync:
+The uplink definition lives in three places that must stay in sync — one per kind of node, plus
+the server that parses them all:
 
-| Language | File |
-|---|---|
-| C (firmware) | `firmware/main/csi_wire.h` |
-| Python (server) | `server/csi/protocol.py` |
+| Language | File | Pinned by |
+|---|---|---|
+| C (ESP32 firmware) | `firmware/main/csi_wire.h` | `firmware/scripts/run_host_tests.sh` |
+| Python (server) | `server/csi/protocol.py` | `server/tests/test_protocol.py` |
+| Python (Pi node) | `pi/csi_node.py` | `pi/tests/test_csi_node.py` |
 
 The browser never sees an uplink datagram — it gets the downlink format below, defined in
 `server/csi/downlink.py` and `web/src/lib/protocol.ts`.
 
 `server/tests/test_protocol.py` pins the byte layout so drift is caught by CI rather than by a
-silent parse failure at 100 Hz.
+silent parse failure at 100 Hz. The Pi node's copy is pinned differently and more strongly: its
+tests parse the datagrams it produces with `server/csi/protocol.py` itself, so the two cannot
+disagree about the layout without a test failing.
 
 ---
 
@@ -69,8 +73,38 @@ Setting `CSI_LOCK_BSSID` in the firmware prevents the roam in the first place; t
 tells you whether the lock is holding.
 
 `n_sub` is explicit and per-frame. Nothing downstream may assume 64. HT20 gives 64, HT40 gives
-128, a future Nexmon node will send 256. The subcarrier layout tables in
-`server/csi/dsp/subcarriers.py` are keyed on `n_sub`.
+128, and a Raspberry Pi running Nexmon on an 80 MHz channel sends 256. The subcarrier layout
+tables in `server/csi/dsp/subcarriers.py` are keyed on `n_sub`.
+
+### Two kinds of producer
+
+The header is written by an ESP32 (`firmware/`) or by a Pi running Nexmon (`pi/`). Both are
+stations probing an access point, so the fields mean the same thing either way — but on the Pi
+several are *synthesized* rather than read from the radio, and it is worth knowing which:
+
+| Field | ESP32 | Pi |
+|---|---|---|
+| `timestamp` | `esp_timer_get_time()`, in the CSI callback | kernel receive timestamp (`SO_TIMESTAMPNS`) |
+| `seq` | incremented per CSI callback | minted per forwarded frame; the 802.11 sequence number is *not* used |
+| `rssi` | `wifi_pkt_rx_ctrl_t` | the driver's estimate from `/proc/net/wireless`, sampled at 1 Hz |
+| `noise_floor` | `wifi_pkt_rx_ctrl_t` | usually unavailable; sent as 0 |
+| `src_mac` | the associated BSSID | read from the nexmon packet |
+| `link_epoch` | incremented on association | incremented when the transmitter or chanspec changes |
+| `data` | `memcpy` of the driver's int8 buffer | int16 scaled per frame into int8 |
+
+The Pi's `seq` is deliberately not the one Nexmon reports: that is the transmitter's 802.11
+sequence number, 12 bits wide, and it wraps every 4096 frames. Forwarded as-is, a wrap reads
+as a reboot roughly every 41 seconds at 100 Hz.
+
+Nexmon has no notion of an epoch, but it reports the transmitter and the chanspec of every
+frame, and a change in either is exactly what the epoch exists to signal — a roam, a reconnect,
+or the access point changing channel. The Pi's clock and counter stay monotonic across one, so
+the server sees a roam rather than a roam *and* a reboot. See `pi/README.md`.
+
+The Pi's amplitude is scaled per frame, which discards absolute gain. That costs less than it
+sounds — `preprocess.py` divides by the frame's own RMS in both default normalization modes —
+but it does mean the AGC step detector cannot fire on a Pi frame, because the step was removed
+before the server saw it.
 
 ### Why (imag, real) and not (real, imag)
 

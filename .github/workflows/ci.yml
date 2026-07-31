@@ -32,8 +32,14 @@ jobs:
 
       - run: python -m pytest server/tests -q
 
+      # The Pi node's tests parse its datagrams with the server's own protocol module, so they
+      # run here where that package is installed rather than in a job of their own.
+      - run: python -m pytest pi/tests -q
+
       - run: python -m ruff check .
         working-directory: server
+
+      - run: python -m ruff check --config server/pyproject.toml pi
 
   firmware:
     name: firmware host tests
