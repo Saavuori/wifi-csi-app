@@ -1,0 +1,966 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wifi-csi-app — sense a room with the WiFi you already have</title>
+<meta name="description" content="Motion, presence and breathing rate from one ESP32 or one Raspberry Pi, measured against the access point you already have. Open source, self-hosted, amplitude-only.">
+<meta property="og:title" content="wifi-csi-app">
+<meta property="og:description" content="Motion, presence and breathing rate from one ESP32 or one Raspberry Pi, measured against the access point you already have.">
+<meta property="og:type" content="website">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Martian+Mono:wght@400;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+
+<style>
+/* Dark, and not themeable — the same commitment the app makes, for the same reason: a colormap
+   on a light background loses most of its dynamic range to glare. The accent system is viridis
+   itself, sampled. The instrument's own encoding is the identity. */
+:root {
+  --bg: #0d0f14;
+  --panel: #151922;
+  --panel-2: #1b2029;
+  --line: #262c38;
+  --line-bright: #38414f;
+  --text: #e6e9ef;
+  --muted: #8b93a3;
+  --dim: #626b7d;
+
+  --v-deep: #440154;
+  --v-blue: #31688e;
+  --v-teal: #21918c;
+  --v-green: #5ec962;
+  --v-yellow: #fde725;
+
+  --link: #4cc9f0;
+  --warn: #ffd166;
+
+  --mono: "Martian Mono", ui-monospace, "SF Mono", "Cascadia Mono", "Segoe UI Mono", monospace;
+  --sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  --gap: clamp(56px, 8vw, 104px);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--link); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+a:hover { color: #7fdcfa; }
+
+:focus-visible {
+  outline: 2px solid var(--v-green);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+img { max-width: 100%; height: auto; display: block; }
+
+.wrap {
+  width: min(1080px, 100% - 2.5rem);
+  margin-inline: auto;
+}
+
+/* Instrument labelling: wide-tracked mono, the way a scale is labelled on a meter face. */
+.label {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+/* -- masthead ---------------------------------------------------------------------------- */
+
+.masthead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 18px 0 16px;
+  flex-wrap: wrap;
+}
+
+.wordmark {
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text);
+  text-decoration: none;
+}
+.wordmark:hover { color: var(--text); }
+
+.masthead-links {
+  display: flex;
+  gap: 1.4rem;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.masthead-links a { color: var(--muted); text-decoration: none; }
+.masthead-links a:hover { color: var(--v-green); }
+
+/* -- the waterfall, which is the whole thesis -------------------------------------------- */
+
+.readout {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow: hidden;
+  background: #06070a;
+}
+
+#waterfall {
+  display: block;
+  width: 100%;
+  height: clamp(190px, 26vw, 280px);
+  background: #06070a;
+}
+
+.readout-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 1.6rem;
+  padding: 9px 14px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.04em;
+}
+
+.readout-strip dt {
+  display: inline;
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  font-size: 0.58rem;
+}
+.readout-strip dd {
+  display: inline;
+  margin: 0 0 0 0.5rem;
+  color: var(--text);
+  font-weight: 600;
+}
+.readout-strip .pair { white-space: nowrap; }
+.readout-strip .is-motion { color: var(--warn); }
+.readout-strip .is-clear { color: var(--v-green); }
+.readout-caption {
+  margin-left: auto;
+  color: var(--dim);
+  font-size: 0.58rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+/* -- hero ---------------------------------------------------------------------------------- */
+
+.hero { padding-bottom: var(--gap); }
+
+.hero-copy {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  gap: clamp(28px, 5vw, 64px);
+  align-items: start;
+  margin-top: clamp(34px, 5vw, 58px);
+}
+
+h1 {
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: clamp(1.55rem, 3.5vw, 2.6rem);
+  line-height: 1.14;
+  letter-spacing: -0.035em;
+  margin: 0;
+  text-wrap: balance;
+}
+h1 em {
+  font-style: normal;
+  color: var(--v-green);
+}
+
+.hero-lede {
+  margin: 1.15rem 0 0;
+  font-size: 1.02rem;
+  color: #c3c9d5;
+  max-width: 46ch;
+}
+
+.hero-aside { padding-top: 0.3rem; }
+
+.cmd {
+  margin-top: 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+}
+.cmd-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 11px 12px;
+}
+.cmd code {
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  line-height: 1.5;
+  color: var(--text);
+  overflow-x: auto;
+  white-space: pre;
+  flex: 1;
+  scrollbar-width: thin;
+}
+.cmd-copy {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 0.56rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--line-bright);
+  border-radius: 3px;
+  padding: 5px 8px;
+  cursor: pointer;
+}
+.cmd-copy:hover { color: var(--v-green); border-color: var(--v-teal); }
+.cmd-note {
+  margin: 0.7rem 0 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+/* -- measured strip ------------------------------------------------------------------------ */
+
+.measured {
+  border-block: 1px solid var(--line);
+  padding: clamp(22px, 3vw, 30px) 0;
+}
+.measured-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: clamp(20px, 3vw, 36px);
+}
+.measured-grid div { min-width: 0; }
+.measured-value {
+  font-family: var(--mono);
+  font-size: clamp(1.1rem, 2.1vw, 1.5rem);
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+  color: var(--v-green);
+}
+.measured-key { margin-top: 0.45rem; display: block; }
+.measured-note {
+  margin: clamp(18px, 2.5vw, 26px) 0 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+  max-width: 68ch;
+}
+
+/* -- sections ------------------------------------------------------------------------------ */
+
+section { padding-block: var(--gap); }
+
+/* The rule breaks for its label, the way a scale breaks for its gradation mark. */
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  margin-bottom: clamp(26px, 3.5vw, 38px);
+}
+.section-head::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+h2 {
+  font-family: var(--mono);
+  font-size: clamp(1.1rem, 2.1vw, 1.5rem);
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.25;
+  margin: 0 0 1rem;
+}
+
+h3 {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin: 0 0 0.5rem;
+}
+
+p { margin: 0 0 1rem; }
+p:last-child { margin-bottom: 0; }
+
+.prose { max-width: 66ch; }
+.prose strong { color: var(--text); font-weight: 600; }
+
+.two-col {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: clamp(28px, 5vw, 64px);
+  align-items: start;
+}
+
+/* -- signal path diagram ------------------------------------------------------------------- */
+
+.diagram {
+  margin-top: clamp(28px, 4vw, 44px);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  padding: clamp(18px, 3vw, 30px);
+}
+.diagram svg { width: 100%; height: auto; display: block; }
+.diagram-text { fill: var(--muted); font-family: var(--mono); font-size: 9px; letter-spacing: 0.08em; }
+.diagram-title { fill: var(--text); font-family: var(--mono); font-size: 10.5px; font-weight: 700; }
+.diagram-box { fill: var(--panel-2); stroke: var(--line-bright); }
+.diagram-flow { stroke: var(--v-teal); fill: none; stroke-width: 1.2; }
+.diagram-flow-back { stroke: var(--v-green); fill: none; stroke-width: 1.2; }
+.diagram-arrow-out { fill: var(--v-teal); }
+.diagram-arrow-back { fill: var(--v-green); }
+
+/* -- node comparison ----------------------------------------------------------------------- */
+
+.nodes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 1px;
+  background: var(--line);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.node-card {
+  background: var(--panel);
+  padding: clamp(20px, 3vw, 28px);
+}
+.node-card > .label { color: var(--v-teal); }
+.node-card h3 { margin-top: 0.55rem; }
+.node-card p { font-size: 0.92rem; color: var(--muted); }
+.node-spec {
+  margin: 1.1rem 0 0;
+  border-top: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.03em;
+}
+.node-spec div {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line);
+}
+.node-spec dt { color: var(--dim); }
+.node-spec dd { margin: 0; color: var(--text); text-align: right; }
+
+/* -- screenshots --------------------------------------------------------------------------- */
+
+.shots {
+  display: grid;
+  gap: clamp(24px, 4vw, 40px);
+  margin-top: clamp(28px, 4vw, 44px);
+}
+figure {
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--panel);
+}
+figcaption {
+  padding: 11px 14px;
+  border-top: 1px solid var(--line);
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+/* -- scope --------------------------------------------------------------------------------- */
+
+.scope {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: clamp(28px, 5vw, 56px);
+}
+.scope ul {
+  margin: 0.9rem 0 0;
+  padding: 0;
+  list-style: none;
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.02em;
+  line-height: 1.5;
+}
+.scope li {
+  padding: 9px 0 9px 1.1rem;
+  border-bottom: 1px solid var(--line);
+  position: relative;
+  color: var(--muted);
+}
+.scope li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 17px;
+  width: 5px;
+  height: 1px;
+  background: currentColor;
+}
+.scope-will li { color: #cfd5e0; }
+.scope-will .label { color: var(--v-green); }
+.scope-wont .label { color: var(--v-deep); filter: brightness(1.9); }
+
+/* -- closing ------------------------------------------------------------------------------- */
+
+.closing { border-top: 1px solid var(--line); }
+.closing h2 { margin-bottom: 1.2rem; }
+
+.links {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 1px;
+  background: var(--line);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-top: clamp(26px, 4vw, 40px);
+}
+.links a {
+  background: var(--panel);
+  padding: 18px 20px;
+  text-decoration: none;
+  color: var(--text);
+  display: block;
+}
+.links a:hover { background: var(--panel-2); }
+.links a strong {
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  display: block;
+}
+.links a span {
+  display: block;
+  margin-top: 0.3rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+footer {
+  border-top: 1px solid var(--line);
+  padding: 26px 0 44px;
+  font-size: 0.85rem;
+  color: var(--dim);
+}
+footer p { margin: 0; }
+
+/* -- responsive ---------------------------------------------------------------------------- */
+
+@media (max-width: 760px) {
+  .hero-copy, .two-col { grid-template-columns: minmax(0, 1fr); }
+  .readout-caption { margin-left: 0; width: 100%; padding-top: 4px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <nav class="masthead">
+    <a class="wordmark" href="#top">wifi-csi-app</a>
+    <div class="masthead-links">
+      <a href="#how">How it works</a>
+      <a href="#hardware">Hardware</a>
+      <a href="#scope">Scope</a>
+      <a href="https://github.com/Saavuori/wifi-csi-app">GitHub</a>
+    </div>
+  </nav>
+</div>
+
+<header class="hero wrap" id="top">
+  <div class="readout">
+    <canvas id="waterfall" width="1024" height="280"
+            role="img"
+            aria-label="A simulated CSI waterfall: 64 subcarriers stacked as horizontal bands, time running left to right. Amplitude is colour-mapped with viridis, and every band brightens at once when someone crosses the link."></canvas>
+    <dl class="readout-strip">
+      <span class="pair"><dt>Rate</dt><dd id="ro-rate">—</dd></span>
+      <span class="pair"><dt>Subcarriers</dt><dd id="ro-sub">64</dd></span>
+      <span class="pair"><dt>Room</dt><dd id="ro-presence">—</dd></span>
+      <span class="pair"><dt>Breathing</dt><dd id="ro-breath">—</dd></span>
+      <span class="readout-caption">Synthetic — this page has no radio</span>
+    </dl>
+  </div>
+
+  <div class="hero-copy">
+    <div>
+      <h1>Sense a room with the <em>WiFi you already have</em>.</h1>
+      <p class="hero-lede">One ESP32 or one Raspberry Pi joins your network, pings the access
+        point 100 times a second, and measures what the room does to each reply. Motion,
+        presence and breathing rate, computed on your own hardware and stored on your own
+        disk.</p>
+    </div>
+    <div class="hero-aside">
+      <span class="label">Install on a Raspberry Pi</span>
+      <div class="cmd">
+        <div class="cmd-row">
+          <code id="install-cmd">curl -fsSL https://raw.githubusercontent.com/Saavuori/wifi-csi-app/main/install.sh | bash</code>
+          <button class="cmd-copy" type="button" data-copy="#install-cmd">Copy</button>
+        </div>
+      </div>
+      <p class="cmd-note">Server, web app and — on a Pi 3B+, 4, 5 or CM4 — the capture itself,
+        on one box. Then open <code>http://&lt;pi&gt;:8080</code>.</p>
+    </div>
+  </div>
+</header>
+
+<div class="measured wrap">
+  <span class="label">Measured on hardware, 31 July 2026</span>
+  <div class="measured-grid" style="margin-top: 1.1rem">
+    <div><span class="measured-value">94.7 Hz</span><span class="label measured-key">Frame rate</span></div>
+    <div><span class="measured-value">0.00%</span><span class="label measured-key">Sequence loss</span></div>
+    <div><span class="measured-value">26,471</span><span class="label measured-key">Frames, no gaps</span></div>
+    <div><span class="measured-value">5.2 ms</span><span class="label measured-key">Jitter</span></div>
+    <div><span class="measured-value">−82 dBm</span><span class="label measured-key">RSSI</span></div>
+  </div>
+  <p class="measured-note">One ESP32-S3 station node on a consumer mesh, probing by UDP echo, up
+    5 h 38 m with no reboots and no roams. Every number the project claims is one it has
+    printed.</p>
+</div>
+
+<section class="wrap" id="how">
+  <div class="section-head"><span class="label">Node → air → server → you</span></div>
+  <h2>One node makes its own traffic, then measures it</h2>
+
+  <div class="two-col">
+    <div class="prose">
+      <p>Channel State Information is what a WiFi radio already computes to decode a packet: a
+        complex amplitude and phase for every subcarrier. A person in the path changes it. That
+        is the whole physical basis — no camera, no microphone, no wearable.</p>
+      <p>The catch is sample rate. A station that only listens gets a CSI callback whenever the
+        access point happens to address it, which on an idle network is a few frames a second.
+        The spectrum you compute from that describes your household's traffic pattern, not your
+        room.</p>
+    </div>
+    <div class="prose">
+      <p><strong>So the node provokes its own downlink stream.</strong> It sends a probe at a
+        fixed 100 Hz and reports CSI for every reply, which makes the sampling rate a property
+        of the node rather than of the network. The link it senses runs from the node to the
+        access point — pick which access point, and you have picked the line through the house
+        the system watches.</p>
+      <p>The probe is a UDP round trip through the server, because routers rate-limit ICMP:
+        this one stopped answering pings entirely under sustained probing while still answering
+        a laptop, and the yield went from 0% to 96% on the switch.</p>
+    </div>
+  </div>
+
+  <div class="diagram">
+    <svg viewBox="0 0 720 190" xmlns="http://www.w3.org/2000/svg" aria-label="Signal path: the node probes the access point at 100 hertz, the access point replies, the node attaches CSI to each reply and sends it to the server over UDP, and the server streams metrics to the browser over a WebSocket.">
+      <defs>
+        <marker id="a-out" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0 0 L8 4 L0 8 z" class="diagram-arrow-out"/>
+        </marker>
+        <marker id="a-back" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0 0 L8 4 L0 8 z" class="diagram-arrow-back"/>
+        </marker>
+      </defs>
+
+      <rect class="diagram-box" x="1" y="46" width="150" height="66" rx="3"/>
+      <text class="diagram-title" x="14" y="72">node</text>
+      <text class="diagram-text" x="14" y="90">ESP32 or Pi</text>
+      <text class="diagram-text" x="14" y="103">one board</text>
+
+      <rect class="diagram-box" x="266" y="46" width="130" height="66" rx="3"/>
+      <text class="diagram-title" x="279" y="72">your AP</text>
+      <text class="diagram-text" x="279" y="90">already in</text>
+      <text class="diagram-text" x="279" y="103">the house</text>
+
+      <rect class="diagram-box" x="446" y="46" width="130" height="66" rx="3"/>
+      <text class="diagram-title" x="459" y="72">server</text>
+      <text class="diagram-text" x="459" y="90">ingest, record</text>
+      <text class="diagram-text" x="459" y="103">analyse</text>
+
+      <rect class="diagram-box" x="626" y="46" width="93" height="66" rx="3"/>
+      <text class="diagram-title" x="639" y="72">browser</text>
+      <text class="diagram-text" x="639" y="90">waterfall</text>
+      <text class="diagram-text" x="639" y="103">breathing</text>
+
+      <path class="diagram-flow" d="M151 64 L258 64" marker-end="url(#a-out)"/>
+      <text class="diagram-text" x="164" y="55">probe, 100 Hz</text>
+
+      <path class="diagram-flow-back" d="M266 94 L159 94" marker-end="url(#a-back)"/>
+      <text class="diagram-text" x="176" y="112">reply → CSI</text>
+
+      <path class="diagram-flow" d="M396 79 L438 79" marker-end="url(#a-out)"/>
+      <path class="diagram-flow" d="M576 79 L618 79" marker-end="url(#a-out)"/>
+      <text class="diagram-text" x="392" y="30">CSI over UDP</text>
+      <text class="diagram-text" x="580" y="30">WebSocket</text>
+      <path class="diagram-flow" d="M410 36 L410 70" opacity="0.35"/>
+      <path class="diagram-flow" d="M598 36 L598 70" opacity="0.35"/>
+
+      <text class="diagram-text" x="1" y="160">Every frame is (timestamp, node id, complex[N]) with N explicit per frame — so a 64-subcarrier ESP32</text>
+      <text class="diagram-text" x="1" y="174">and a 256-subcarrier Pi are the same kind of thing to everything downstream of the node.</text>
+    </svg>
+  </div>
+</section>
+
+<section class="wrap" id="hardware">
+  <div class="section-head"><span class="label">Pick one</span></div>
+  <h2>Two kinds of node, one uplink format</h2>
+  <p class="prose">They are interchangeable by design. Nothing in the recorder, the DSP or the
+    web app knows which one it is looking at.</p>
+
+  <div class="nodes" style="margin-top: clamp(28px, 4vw, 40px)">
+    <div class="node-card">
+      <span class="label">Option A</span>
+      <h3>ESP32-S3 or ESP32</h3>
+      <p>One board, flashed once, then configured from a settings page it serves itself — SSID,
+        BSSID lock, server address and probe rate, no toolchain and no cable. Timestamps are
+        taken in the CSI callback, which is as close to the antenna as this gets.</p>
+      <dl class="node-spec">
+        <div><dt>Subcarriers</dt><dd>64 (HT20)</dd></div>
+        <div><dt>Timestamp</dt><dd>on-device, µs</dd></div>
+        <div><dt>RSSI</dt><dd>per frame</dd></div>
+        <div><dt>Status</dt><dd>run on hardware</dd></div>
+      </dl>
+    </div>
+    <div class="node-card">
+      <span class="label">Option B</span>
+      <h3>Raspberry Pi + nexmon_csi</h3>
+      <p>A Pi 3B+, 4, 5 or CM4 patched to report CSI while staying associated, so the same box
+        can be sensor, server and UI at once. Four times the frequency resolution, paid for in
+        kernel-level timestamps and per-frame amplitude scaling.</p>
+      <dl class="node-spec">
+        <div><dt>Subcarriers</dt><dd>up to 256 (80 MHz)</dd></div>
+        <div><dt>Timestamp</dt><dd>kernel, SO_TIMESTAMPNS</dd></div>
+        <div><dt>RSSI</dt><dd>driver, 1 Hz</dd></div>
+        <div><dt>Status</dt><dd>tested, not yet run on a Pi</dd></div>
+      </dl>
+    </div>
+  </div>
+</section>
+
+<section class="wrap" id="app">
+  <div class="section-head"><span class="label">What you get</span></div>
+  <h2>An instrument first, a detector second</h2>
+  <p class="prose">The waterfall is the view you use to decide whether the capture chain works
+    at all: wave an arm, and if it does not visibly react, nothing downstream is worth reading.
+    Everything else — motion, presence, breathing, heart rate, placement — is computed
+    server-side, identically for live and replayed frames, so a recording is a faithful stand-in
+    for the room.</p>
+
+  <div class="shots">
+    <figure>
+      <img src="screenshot-live.png" width="1600" height="900" loading="lazy"
+           alt="The app's waterfall view showing live CSI: subcarrier index across, time down, amplitude in viridis, with horizontal blank stripes where the guard and DC subcarriers sit.">
+      <figcaption>Live CSI from an ESP32-S3. The blank horizontal bands are the guard and DC
+        subcarriers — HT20 carries 64 bins and populates 52 of them, so the empty stripe around
+        index 32 is the format, not a fault.</figcaption>
+    </figure>
+    <figure>
+      <img src="screenshot-node-health.png" width="1600" height="900" loading="lazy"
+           alt="The node health view: per-node frame rate, sequence loss, jitter, RSSI, uptime and roam count, with one node online and one idle.">
+      <figcaption>Node health, measured from device timestamps rather than arrival times. Rate,
+        loss and roams are the three numbers that tell you whether to trust anything else on the
+        page.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="wrap" id="scope">
+  <div class="section-head"><span class="label">Before you build one</span></div>
+  <h2>What it will and won't do</h2>
+  <p class="prose">Single-link, amplitude-only sensing is one scalar view of a room. That buys a
+    surprising amount and it has a hard ceiling, and knowing where the ceiling is up front is
+    worth more than an optimistic feature list.</p>
+
+  <div class="scope" style="margin-top: clamp(28px, 4vw, 40px)">
+    <div class="scope-will">
+      <span class="label">Will</span>
+      <ul>
+        <li>Motion detection</li>
+        <li>Room-level presence</li>
+        <li>Breathing rate at tuned positions</li>
+        <li>An overnight activity record</li>
+        <li>A genuinely nice CSI visualization tool</li>
+      </ul>
+    </div>
+    <div class="scope-wont">
+      <span class="label">Won't</span>
+      <ul>
+        <li>Localization or direction</li>
+        <li>Reliable multi-person counting</li>
+        <li>Pose</li>
+        <li>Heart rate beyond close range, motionless</li>
+        <li>CSI-ratio tricks — two boards, two oscillators</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="closing wrap">
+  <div class="section-head"><span class="label">Start here</span></div>
+  <h2>Try it without any hardware</h2>
+  <p class="prose">The stack ships with a synthetic node whose channel model is physical enough
+    that the answers are known — a specific breathing rate, a specific motion schedule. It is how
+    the DSP was developed and how it is tested, and it is the fastest way to see whether the app
+    is worth putting a radio behind.</p>
+
+  <div class="links">
+    <a href="https://github.com/Saavuori/wifi-csi-app#quick-start-without-hardware">
+      <strong>Run the demo →</strong>
+      <span>Server plus synthetic node, two terminals</span>
+    </a>
+    <a href="https://github.com/Saavuori/wifi-csi-app/blob/main/firmware/README.md">
+      <strong>ESP32 firmware →</strong>
+      <span>The settings that decide whether capture works</span>
+    </a>
+    <a href="https://github.com/Saavuori/wifi-csi-app/blob/main/pi/README.md">
+      <strong>Raspberry Pi node →</strong>
+      <span>nexmon_csi, and what it synthesizes</span>
+    </a>
+    <a href="https://github.com/Saavuori/wifi-csi-app/blob/main/docs/wire-format.md">
+      <strong>Wire format →</strong>
+      <span>The uplink packet, byte by byte</span>
+    </a>
+  </div>
+</section>
+
+<footer class="wrap">
+  <p>Open source on <a href="https://github.com/Saavuori/wifi-csi-app">GitHub</a>. The waterfall
+    at the top of this page is generated in your browser from a channel model — no radio, no
+    telemetry, nothing leaves the tab.</p>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+
+  /* -- copy buttons ---------------------------------------------------------------------- */
+  document.querySelectorAll(".cmd-copy").forEach(function (button) {
+    button.addEventListener("click", function () {
+      var source = document.querySelector(button.dataset.copy);
+      if (!source || !navigator.clipboard) return;
+      navigator.clipboard.writeText(source.textContent.trim()).then(function () {
+        button.textContent = "Copied";
+        setTimeout(function () { button.textContent = "Copy"; }, 1600);
+      });
+    });
+  });
+
+  /* -- the waterfall ---------------------------------------------------------------------
+     A channel model, not a decoration. 64 subcarriers with a fixed multipath fade profile,
+     breathing as a frequency-selective sinusoid, and periodic broadband motion. The guard and
+     DC bins are left empty because HT20 populates 52 of its 64, which is the thing the caption
+     under the real screenshot has to explain. Colours come from the app's own viridis LUT. */
+
+  var canvas = document.getElementById("waterfall");
+  if (!canvas || !canvas.getContext) return;
+  var ctx = canvas.getContext("2d", { alpha: false });
+  if (!ctx) return;
+
+  var N_SUB = 64;                  // stacked vertically, as in the app: one band per subcarrier
+  var COLS = 300;                  // time samples on screen, newest at the right
+  var DT = 1 / 24;                 // seconds per displayed column
+  var BREATH_HZ = 14 / 60;         // 14 breaths a minute, the value the demo scenario uses
+  var MOTION_PERIOD = 21;          // seconds between passes through the link
+  var MOTION_LENGTH = 2.6;
+
+  // Viridis anchors, sampled from matplotlib — the same ten the app interpolates.
+  var ANCHORS = [
+    [68, 1, 84], [72, 40, 120], [62, 74, 137], [49, 104, 142], [38, 130, 142],
+    [31, 158, 137], [53, 183, 121], [109, 205, 89], [180, 222, 44], [253, 231, 37]
+  ];
+  var LUT = new Uint8Array(256 * 3);
+  for (var i = 0; i < 256; i++) {
+    var x = (i / 255) * (ANCHORS.length - 1);
+    var lo = Math.min(Math.floor(x), ANCHORS.length - 2);
+    var f = x - lo;
+    for (var c = 0; c < 3; c++) {
+      LUT[i * 3 + c] = ANCHORS[lo][c] + (ANCHORS[lo + 1][c] - ANCHORS[lo][c]) * f;
+    }
+  }
+
+  // Deterministic noise, so the page looks the same on every load and in every screenshot.
+  var seed = 0x5f3759df;
+  function rand() {
+    seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5;
+    return ((seed >>> 0) % 100000) / 100000;
+  }
+
+  // Which bins carry data. HT20: guards at the edges, null at DC.
+  var active = new Array(N_SUB);
+  for (var k = 0; k < N_SUB; k++) {
+    active[k] = !(k < 4 || k > 59 || (k >= 31 && k <= 32));
+  }
+
+  // Static multipath: a few smooth fades across the band, fixed for the life of the page.
+  var fade = new Float32Array(N_SUB);
+  var respGain = new Float32Array(N_SUB);
+  var respPhase = new Float32Array(N_SUB);
+  var motionGain = new Float32Array(N_SUB);
+  // Scaled so a quiet room lands across the blue-to-green half of the map and leaves the
+  // yellow end as headroom: motion is then legible as a brightening rather than as a change
+  // of hue in an already-saturated image.
+  var p1 = rand() * 6.28, p2 = rand() * 6.28, p3 = rand() * 6.28;
+  for (k = 0; k < N_SUB; k++) {
+    var u = k / N_SUB;
+    fade[k] = 0.30
+      + 0.15 * Math.sin(u * 6.9 + p1)
+      + 0.09 * Math.sin(u * 15.4 + p2)
+      + 0.05 * Math.sin(u * 27.1 + p3);
+    respGain[k] = 0.25 + 0.75 * Math.abs(Math.sin(u * 9.1 + p2));
+    respPhase[k] = u * 4.2 + p3;
+    motionGain[k] = 0.35 + 0.65 * rand();
+  }
+
+  // Ring of colour-map indices, one column per time sample. `head` is where the next column
+  // goes, which is also the oldest one still on screen.
+  var grid = new Uint8Array(N_SUB * COLS);
+  var head = 0;
+  // Start part way through a cycle so the warm-up buffer already contains one pass through the
+  // link. The page then opens on the thing it is claiming — a bright broadband smear across
+  // otherwise steady bands — instead of on twelve seconds of an empty room.
+  var t = 12;
+  var image = ctx.createImageData(COLS, N_SUB);
+
+  function step() {
+    var phase = t % MOTION_PERIOD;
+    var moving = phase > MOTION_PERIOD - MOTION_LENGTH;
+    // Fade the disturbance in and out rather than switching it, so it reads as a person
+    // crossing the link instead of a glitch in the renderer.
+    var envelope = moving
+      ? Math.sin(((phase - (MOTION_PERIOD - MOTION_LENGTH)) / MOTION_LENGTH) * Math.PI)
+      : 0;
+
+    var col = head;
+    head = (head + 1) % COLS;
+    for (var k = 0; k < N_SUB; k++) {
+      if (!active[k]) { grid[k * COLS + col] = 0; continue; }
+      var breath = 1 + 0.20 * respGain[k] * Math.sin(6.2832 * BREATH_HZ * t + respPhase[k]);
+      var motion = 1 + 1.60 * envelope * motionGain[k] * (0.45 + 0.55 * rand());
+      var v = fade[k] * breath * motion * (0.94 + 0.12 * rand());
+      grid[k * COLS + col] = Math.max(1, Math.min(255, Math.round(v * 255)));
+    }
+    t += DT;
+    return { moving: moving, envelope: envelope };
+  }
+
+  var scratch = document.createElement("canvas");
+  scratch.width = COLS;
+  scratch.height = N_SUB;
+  var sctx = scratch.getContext("2d");
+
+  function paint() {
+    if (canvas.width < 1 || canvas.height < 1) return;
+    var data = image.data;
+    for (var k = 0; k < N_SUB; k++) {
+      var band = k * COLS;
+      for (var x = 0; x < COLS; x++) {
+        var idx = grid[band + (head + x) % COLS];   // x = 0 is the oldest column
+        var o = (k * COLS + x) * 4;
+        if (idx === 0) {
+          data[o] = 6; data[o + 1] = 7; data[o + 2] = 10;
+        } else {
+          var v = idx * 3;
+          data[o] = LUT[v]; data[o + 1] = LUT[v + 1]; data[o + 2] = LUT[v + 2];
+        }
+        data[o + 3] = 255;
+      }
+    }
+    // Stretch the 64-band buffer over the canvas without smoothing, so subcarriers stay
+    // countable — a blurred waterfall is a misleading one.
+    sctx.putImageData(image, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(scratch, 0, 0, COLS, N_SUB, 0, 0, canvas.width, canvas.height);
+  }
+
+  var roRate = document.getElementById("ro-rate");
+  var roPresence = document.getElementById("ro-presence");
+  var roBreath = document.getElementById("ro-breath");
+
+  function readout(state) {
+    roRate.textContent = (94.2 + rand() * 2.4).toFixed(1) + " Hz";
+    if (state.moving) {
+      roPresence.textContent = "motion";
+      roPresence.className = "is-motion";
+      // The real estimator declines a window it cannot trust rather than returning a number
+      // from one; showing a breathing rate through a walk-past would be the lie.
+      roBreath.textContent = "— (window rejected)";
+      roBreath.className = "";
+    } else {
+      roPresence.textContent = "clear";
+      roPresence.className = "is-clear";
+      roBreath.textContent = (13.8 + rand() * 0.5).toFixed(1) + " / min";
+      roBreath.className = "";
+    }
+  }
+
+  // Sized from its CSS box, which may not exist yet when this script runs. A canvas that gets
+  // measured at zero paints nothing and never recovers on its own, so observe the element and
+  // re-measure the moment it actually has a box.
+  function resize() {
+    var ratio = Math.min(window.devicePixelRatio || 1, 2);
+    var w = Math.round(canvas.clientWidth * ratio);
+    var h = Math.round(canvas.clientHeight * ratio);
+    if (w < 1 || h < 1) return;
+    if (w !== canvas.width || h !== canvas.height) {
+      canvas.width = w;
+      canvas.height = h;
+    }
+    paint();
+  }
+
+  // Fill the buffer before the first paint, so the page never opens on an empty panel.
+  var warm = { moving: false, envelope: 0 };
+  for (i = 0; i < COLS; i++) warm = step();
+  resize();
+  readout(warm);
+
+  if (window.ResizeObserver) new ResizeObserver(resize).observe(canvas);
+  // Also on window resize: moving a window between displays changes devicePixelRatio without
+  // changing the element's CSS box, which ResizeObserver does not report.
+  window.addEventListener("resize", resize);
+
+  var still = window.matchMedia("(prefers-reduced-motion: reduce)");
+  if (still.matches) return;   // a filled, static waterfall is a complete picture on its own
+
+  var last = 0, sinceReadout = 0;
+  (function frame(now) {
+    requestAnimationFrame(frame);
+    if (now - last < DT * 1000) return;
+    last = now;
+    var state = step();
+    paint();
+    if (now - sinceReadout > 700) { sinceReadout = now; readout(state); }
+  })(0);
+})();
+</script>
+
+</body>
+</html>
