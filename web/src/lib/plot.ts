@@ -13,6 +13,7 @@ export interface Plot {
   padBottom: number;
   padTop: number;
   padRight: number;
+  fontPx: number;
 }
 
 export function beginPlot(canvas: HTMLCanvasElement, options: Partial<Plot> = {}): Plot | null {
@@ -20,15 +21,21 @@ export function beginPlot(canvas: HTMLCanvasElement, options: Partial<Plot> = {}
   if (context === null) return null;
 
   const ratio = window.devicePixelRatio || 1;
+  // Gutters sized from the canvas rather than fixed. A 44 px axis gutter is a rounding error on
+  // a 900 px-wide plot and an eighth of a phone's, and the axis labels are the same handful of
+  // short numbers either way — so on a narrow canvas they get a narrower margin and a smaller
+  // face, and the data keeps the width it should have had all along.
+  const narrow = canvas.clientWidth > 0 && canvas.clientWidth < 480;
   const plot: Plot = {
     context,
     width: canvas.width,
     height: canvas.height,
     ratio,
-    padLeft: 44 * ratio,
-    padBottom: 24 * ratio,
-    padTop: 10 * ratio,
-    padRight: 10 * ratio,
+    padLeft: (narrow ? 30 : 44) * ratio,
+    padBottom: (narrow ? 18 : 24) * ratio,
+    padTop: (narrow ? 8 : 10) * ratio,
+    padRight: (narrow ? 8 : 10) * ratio,
+    fontPx: narrow ? 9 : 10,
     ...options,
   };
 
@@ -57,7 +64,7 @@ export function drawFrame(plot: Plot, xLabels: [number, string][], yLabels: [num
 
   context.strokeStyle = "rgba(255,255,255,0.10)";
   context.fillStyle = "rgba(255,255,255,0.45)";
-  context.font = `${10 * ratio}px ui-monospace, monospace`;
+  context.font = `${plot.fontPx * ratio}px ui-monospace, monospace`;
   context.lineWidth = ratio;
 
   context.textAlign = "right";
@@ -68,14 +75,17 @@ export function drawFrame(plot: Plot, xLabels: [number, string][], yLabels: [num
     context.moveTo(area.x0, y);
     context.lineTo(area.x1, y);
     context.stroke();
-    context.fillText(label, area.x0 - 6 * ratio, y);
+    context.fillText(label, area.x0 - 4 * ratio, y);
   }
 
-  context.textAlign = "center";
   context.textBaseline = "top";
   for (const [position, label] of xLabels) {
+    // Labels at the very ends are anchored inwards instead of centred. Centred, half of "older"
+    // hangs off the left edge of the canvas — invisible on a desktop's wide plot, and half the
+    // label on a phone's.
+    context.textAlign = position <= 0.01 ? "left" : position >= 0.99 ? "right" : "center";
     const x = area.x0 + position * area.w;
-    context.fillText(label, x, area.y1 + 6 * ratio);
+    context.fillText(label, x, area.y1 + 5 * ratio);
   }
 }
 

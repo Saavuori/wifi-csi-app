@@ -6,7 +6,7 @@
 // sequence number advances on every frame the callback accepted whether or not the ring had
 // room for it. That is the number worth watching: it does not matter where a frame was lost.
 
-import { clear, el, formatDuration, select, slider, toggle, viewLayout } from "../lib/dom";
+import { clear, el, formatDuration, hintBlock, select, slider, toggle, viewLayout } from "../lib/dom";
 import type { NodeHealth, ServerConfig } from "../lib/messages";
 import { store } from "../lib/store";
 import type { View } from "./view";
@@ -54,7 +54,7 @@ export function healthView(): View {
             { class: "node-head" },
             el("span", { class: `dot dot-${state.className}` }),
             el("strong", {}, `Node ${node.node_id}`),
-            el("span", { class: "node-verdict" }, state.text),
+            el("span", { class: `pill pill-${state.className} node-verdict` }, state.text),
           ),
           el(
             "div",
@@ -93,7 +93,9 @@ export function healthView(): View {
           el(
             "button",
             {
-              class: `button ${store.selectedNode.value === node.node_id ? "button-primary" : ""}`,
+              class: `button button-wide ${
+                store.selectedNode.value === node.node_id ? "button-primary" : ""
+              }`,
               onclick: () => store.selectNode(node.node_id),
             },
             store.selectedNode.value === node.node_id ? "Selected" : "Select",
@@ -170,6 +172,7 @@ export function healthView(): View {
   }
 
   const root = viewLayout({
+    controlsTitle: "Preprocessing",
     main: [
       el(
         "div",
@@ -184,9 +187,7 @@ export function healthView(): View {
         { class: "panel" },
         el("div", { class: "panel-head" }, el("h2", {}, "Preprocessing")),
         preprocessing,
-        el(
-          "p",
-          { class: "hint" },
+        hintBlock(
           "These apply identically to live and replayed frames — that is what makes a " +
             "recording a faithful stand-in for the room.",
         ),

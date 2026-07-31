@@ -7,3 +7,6 @@ pi/*.py     text eol=lf
 Containerfile text eol=lf
 *.yml       text eol=lf
 *.yaml      text eol=lf
+# The self-hosted webfonts. Marked so a Windows checkout cannot decide these are text and
+# rewrite line endings inside them, which corrupts the file for no visible reason.
+*.woff2     binary

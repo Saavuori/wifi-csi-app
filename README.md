@@ -188,6 +188,22 @@ and the layout tables are keyed on it.
 Node 10 is the same link seen from the other mesh access point and idles below 1 Hz, so it shows
 as offline. Selecting a node in the header is what picks the link the analysis runs on.
 
+### On a phone
+
+<img src="docs/screenshot-mobile.png" alt="The waterfall on a phone" width="320">
+
+The same app, not a cut-down one: a phone gets the identical waterfall, the identical numbers and
+the identical controls. Only the shell differs. The eight views become five tab-bar destinations
+with the remaining three behind **More**, and each view's control column — the 320 px rail on the
+desktop — becomes a bottom sheet opened by the pill above the tab bar. That last part is the
+reason for the whole layout: as a column, the controls stacked *below* a full-height plot, which
+put them off the bottom of the screen on arrival, and controls nobody scrolls to are controls
+that do not exist.
+
+This matters more here than in most apps, because the reason to hold the instrument on a phone at
+all is that you are across the room moving the node — see the placement tuner — and the number
+you walked over to read has to be the real one.
+
 ## Bringing up a node
 
 Whichever kind, the sequence is the same, and step 3 is the one that decides what the system can

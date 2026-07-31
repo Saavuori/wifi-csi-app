@@ -9,7 +9,7 @@
 // Drag it and watch the peak sharpen; that is a faster route to understanding this phase than
 // any amount of reading.
 
-import { el, fitCanvas, slider, viewLayout } from "../lib/dom";
+import { el, fitCanvas, hintBlock, segmented, slider, viewLayout } from "../lib/dom";
 import type { Metrics, VitalsState } from "../lib/messages";
 import { beginPlot, drawBand, drawFrame, drawSeries, plotArea } from "../lib/plot";
 import { store } from "../lib/store";
@@ -23,6 +23,9 @@ export function vitalsView(band: Band): View {
   const spectrumCanvas = el("canvas", { class: "plot-canvas" });
   const bpmValue = el("div", { class: "bpm-value" }, "—");
   const bpmUnit = el("div", { class: "bpm-unit" }, isHeart ? "BPM" : "breaths/min");
+  // Confidence is what makes the number checkable, so it gets a colour of its own rather than
+  // being the third clause of a sentence you have to read to the end of.
+  const confidence = el("span", { class: "pill" }, "—");
   const detail = el("div", { class: "panel-note" });
   const controls = el("div", { class: "controls" });
 
@@ -36,13 +39,14 @@ export function vitalsView(band: Band): View {
 
     if (latest === null) {
       bpmValue.textContent = "—";
+      bpmValue.style.color = "";
+      confidence.className = "pill";
+      confidence.textContent = "no estimate";
       // A blank panel reads as a broken server. When the server declined for a reason worth
       // acting on — a hole in the link long enough that interpolating across it would have
       // invented a breathing peak — say so, because the fix is on the network, not here.
       const rejected = isHeart ? current?.heart_rejected : current?.breathing_rejected;
-      detail.textContent = rejected
-        ? `no estimate — ${rejected}`
-        : "not enough history in the window yet";
+      detail.textContent = rejected ?? "not enough history in the window yet";
       return;
     }
 
@@ -50,11 +54,14 @@ export function vitalsView(band: Band): View {
     // Confidence is the share of in-band energy sitting in the peak, so it says how much this
     // is one line rather than a hump. Low confidence with a plausible number means do not
     // believe the number.
-    bpmValue.style.color =
-      latest.confidence > 0.35 ? "#06d6a0" : latest.confidence > 0.18 ? "#ffd166" : "#ef476f";
+    const quality =
+      latest.confidence > 0.35 ? "good" : latest.confidence > 0.18 ? "warn" : "bad";
+    bpmValue.style.color = `var(--${quality})`;
+    confidence.className = `pill pill-${quality}`;
+    confidence.textContent = `${(latest.confidence * 100).toFixed(0)}% confidence`;
     detail.textContent =
-      `confidence ${(latest.confidence * 100).toFixed(0)}% · in-band SNR ${latest.snr_db.toFixed(1)} dB` +
-      ` · ${latest.window_s.toFixed(0)}s window · subcarriers ${latest.subcarriers.slice(0, 6).join(", ")}`;
+      `in-band SNR ${latest.snr_db.toFixed(1)} dB · ${latest.window_s.toFixed(0)}s window` +
+      ` · subcarriers ${latest.subcarriers.slice(0, 6).join(", ")}`;
   }
 
   function drawWaveform() {
@@ -163,9 +170,7 @@ export function vitalsView(band: Band): View {
         format: (v) => `bottom ${(v * 100).toFixed(0)}%`,
         onInput: (value) => store.patchConfig({ [band]: { gate_quantile: value } }),
       }),
-      el(
-        "p",
-        { class: "hint" },
+      hintBlock(
         isHeart
           ? "Expect this to work only for a near-motionless person at close range. The cardiac " +
               "signal is far weaker than respiration and gets masked by it. Published results " +
@@ -179,6 +184,7 @@ export function vitalsView(band: Band): View {
   }
 
   const root = viewLayout({
+    controlsTitle: "Analysis",
     main: [
       el(
         "div",
@@ -186,10 +192,25 @@ export function vitalsView(band: Band): View {
         el(
           "div",
           { class: "panel-head" },
-          el("h2", {}, isHeart ? "Heart rate" : "Breathing"),
-          detail,
+          // Both bands share one tab on a phone, so the switch between them lives here. On the
+          // desktop the sidebar lists them separately and this is a second way to the same
+          // place, which is no worse than a duplicate link.
+          segmented({
+            value: band,
+            label: "Band",
+            options: [
+              { value: "breathing", label: "Breathing" },
+              { value: "heart", label: "Heart" },
+            ],
+            onChange: (value) => {
+              if (value !== band) location.hash = value;
+            },
+          }),
+          el("div", { class: "spacer" }),
+          confidence,
         ),
         el("div", { class: "bpm" }, bpmValue, bpmUnit),
+        detail,
       ),
       el(
         "div",
