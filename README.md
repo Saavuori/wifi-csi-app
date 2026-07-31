@@ -9,15 +9,24 @@ a future Raspberry Pi running Nexmon at 256 subcarriers, and a replayed public d
 just producers into that format. Nothing downstream knows or cares which it is looking at.
 
 ```
-   mesh AP  ◄──ping 100 Hz──  ESP32-S3  ──UDP──►  server  ──WebSocket──►  browser
-      │                       station           ingest                    waterfall
-      └────echo reply────►    CSI callback      record  ◄──replay──►      motion
-                                                analyse                   breathing
+   mesh AP  ◄─── probe, 100 Hz ───  ESP32-S3  ──CSI over UDP──►  server  ──WebSocket──►  browser
+      │                             station                      ingest                  waterfall
+      └───── reply ────────────►    CSI callback                 record  ◄──replay──►    motion
+                                    on every reply               analyse                 breathing
 ```
 
-One board. It joins the WiFi you already have, pings the gateway at a fixed rate, and reports
-CSI for each reply — so the link it measures is the one between the board and the access point,
-and the sampling rate is a property of the node rather than of the household's traffic.
+**One board, doing both halves of the job.** It joins the WiFi you already have, sends a probe at
+a fixed rate, and reports CSI for each reply — so it generates the traffic it measures. The link
+it senses is the one between the board and the access point, and the sampling rate is a property
+of the node rather than of the household's traffic. That last part is the whole point: a station
+that only listens gets a CSI callback whenever the access point happens to address it, which on
+an idle network is a few frames a second, and the spectrum you compute from that describes the
+household's traffic pattern rather than the room.
+
+The probe is an ICMP ping to the gateway by default, and a UDP round trip through the server
+(`CSI_PROBE_UDP_ECHO` on the node, `CSI_ECHO_PORT` on the server) when the router will not answer
+pings at rate — which, on the consumer mesh hardware this was built against, it would not. Either
+way the CSI itself reaches the server over UDP.
 
 | Directory | What it is |
 |---|---|
@@ -71,7 +80,7 @@ the Placement view in particular: it exists to be watched while you are across t
 the node, and the number it shows has to be the real one. On Windows the firewall usually needs
 an inbound rule for the interpreter running the server.
 
-## Quick start on Windows, with the board already flashed
+## Quick start on Windows, with a board already flashed
 
 Same command, different path separator — the venv puts its interpreter in `Scripts\` rather than
 `bin/`, and `python -m csi` is the same module either way:
@@ -125,9 +134,20 @@ capture works at all, and why. In short:
    that line; the node is one end of it and you do not get to move the other. It is not the
    strongest access point that wins, it is the one with the right geometry.
 4. Watch the Node health view for a stable rate, sub-1% loss, and `roams` at zero.
+5. Read the **yield** in the node's own serial log — CSI frames over probes. It is the number
+   that has no equivalent in the two-board topology, and the one that tells you whether the
+   access point is holding up its end.
 
 If `roams` climbs, the mesh is still moving the node between access points and every calibration
 dies with each move. Fix that before trusting anything downstream of it.
+
+**If the yield collapses, switch the probe to UDP echo.** Routers rate-limit ICMP, and this one
+stopped answering entirely under sustained 100 Hz probing while still answering a laptop at 4 Hz
+— the yield went to 0%, which reads exactly like a dead board. Rebuild the node with
+`CSI_PROBE_UDP_ECHO` and start the server with `CSI_ECHO_PORT=5568`; that restored it to 96%, and
+the yield is exact there because both ends are ours. Expect to need this on consumer mesh
+hardware. The responder is off unless the variable is set, so setting one without the other is
+the same collapse from the other direction.
 
 **Settings live on the node, not in the image.** After the first flash, the board serves a
 settings page — at its own address on your network, printed at boot, and on a `csi-setup-xxxxxx`
@@ -219,7 +239,7 @@ pipeline rather than by reading it:
 ## Tests
 
 ```sh
-.venv/bin/python -m pytest server/tests      # 122 tests
+.venv/bin/python -m pytest server/tests      # 129 tests
 firmware/scripts/run_host_tests.sh           # ring buffer + wire layout, no hardware needed
 cd web && npm run build                      # typecheck + bundle
 ```
