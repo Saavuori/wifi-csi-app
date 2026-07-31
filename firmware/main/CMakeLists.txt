@@ -3,6 +3,7 @@ idf_component_register(
         "main.c"
         "csi_capture.c"
         "csi_net.c"
+        "csi_probe.c"
         "csi_ring.c"
         "csi_tx.c"
         "csi_wifi.c"

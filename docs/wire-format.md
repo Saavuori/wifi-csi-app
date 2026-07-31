@@ -2,17 +2,19 @@
 
 Two independent binary formats, plus one file container. All little-endian.
 
-- **Uplink** — node → server, UDP. This is the format the plan calls "v1".
+- **Uplink** — node → server, UDP. Currently v2; v1 is still parsed.
 - **Downlink** — server → browser, WebSocket binary frames.
 - **Recording** — length-prefixed uplink datagrams on disk.
 
-A single canonical definition lives in three places that must stay in sync:
+The uplink definition lives in two places that must stay in sync:
 
 | Language | File |
 |---|---|
 | C (firmware) | `firmware/main/csi_wire.h` |
 | Python (server) | `server/csi/protocol.py` |
-| TypeScript (browser) | `web/src/lib/protocol.ts` |
+
+The browser never sees an uplink datagram — it gets the downlink format below, defined in
+`server/csi/downlink.py` and `web/src/lib/protocol.ts`.
 
 `server/tests/test_protocol.py` pins the byte layout so drift is caught by CI rather than by a
 silent parse failure at 100 Hz.
@@ -24,7 +26,7 @@ silent parse failure at 100 Hz.
 ```
 offset size field        type   notes
 0      2    magic        u16    0x4353. On the wire (LE) the bytes read 53 43.
-2      1    version      u8     1
+2      1    version      u8     2
 3      1    node_id      u8     1..254; 0 and 255 reserved
 4      4    seq          u32    monotonic per node, wraps at 2^32
 8      8    timestamp    u64    esp_timer_get_time(), microseconds since boot
@@ -33,11 +35,38 @@ offset size field        type   notes
 18     1    channel      u8     primary channel, 1..14
 19     1    sec_channel  u8     0=none 1=above 2=below
 20     2    n_sub        u16    number of subcarriers in this frame
-22     ...  data         i8[]   2 * n_sub bytes, interleaved (imag, real)
+--- v2 ends v1 here ---------------------------------------------------------
+22     6    src_mac      u8[6]  who transmitted this frame: the AP's BSSID for a station node,
+                                the peer node's MAC for the ESP32 pair
+28     1    link_epoch   u8     increments on every association on the node
+29     1    reserved     u8     zero
+30     ...  data         i8[]   2 * n_sub bytes, interleaved (imag, real)
 ```
 
-Header is 22 bytes, `#pragma pack(1)`-equivalent — no padding anywhere. A HT20 frame with
-64 subcarriers is `22 + 128 = 150` bytes, so at 100 Hz a node emits ~15 KB/s of payload.
+Header is 30 bytes, `#pragma pack(1)`-equivalent — no padding anywhere. A HT20 frame with
+64 subcarriers is `30 + 128 = 158` bytes, so at 100 Hz a node emits ~16 KB/s of payload.
+
+### Versions
+
+v1 was the same header without the last eight bytes. v2 **appends**, so every v1 field is at the
+offset it always was, and `parse_frame` handles both with one struct: a v1 datagram yields a zero
+`src_mac` and epoch 0.
+
+That is not politeness towards old firmware. The recorder stores raw datagrams and the replayer
+hands those exact bytes to this parser, so a version the parser has forgotten is a shelf of
+recordings that no longer open. Any future field goes on the end for the same reason.
+
+### What link_epoch is for
+
+A single node joined to a mesh network can be steered from one access point to another at any
+time. The sequence numbers stay continuous and the device clock keeps running, so nothing else
+in the frame changes — but the far end of the measured link has moved to a different room, and
+every baseline built from the old one is now describing geometry that does not exist. The epoch
+is the only thing that says so. `nodes.py` treats a change in it exactly as it treats a reboot:
+throw the node's history away.
+
+Setting `CSI_LOCK_BSSID` in the firmware prevents the roam in the first place; the epoch is what
+tells you whether the lock is holding.
 
 `n_sub` is explicit and per-frame. Nothing downstream may assume 64. HT20 gives 64, HT40 gives
 128, a future Nexmon node will send 256. The subcarrier layout tables in

@@ -127,7 +127,7 @@ def rank_for_band(
     if kept.size == 0 or len(window) < 16:
         return Selection(kept, np.zeros(kept.size), rejected, "band_snr")
 
-    series, _ = uniform_resample(window.t_us, window.amp[:, kept], fs)
+    series, _, _ = uniform_resample(window.t_us, window.amp[:, kept], fs)
     if series.shape[0] < 16:
         return Selection(kept, np.zeros(kept.size), rejected, "band_snr")
 
@@ -181,7 +181,7 @@ def band_snr_db(
     if kept.size == 0 or len(window) < 32:
         return -60.0
 
-    series, _ = uniform_resample(window.t_us, window.amp[:, kept], fs)
+    series, _, _ = uniform_resample(window.t_us, window.amp[:, kept], fs)
     if series.shape[0] < 32:
         return -60.0
 

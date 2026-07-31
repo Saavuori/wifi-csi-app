@@ -9,6 +9,14 @@
 
 #include "csi_tx.h"
 
+#if !CONFIG_CSI_ROLE_TRANSMITTER
+
+// Compiled into every image, but CSI_TX_* only exist when this role is selected — so the body
+// has to be conditional, not merely unreachable.
+esp_err_t csi_tx_start(void) { return ESP_ERR_NOT_SUPPORTED; }
+
+#else
+
 #include <string.h>
 
 #include "esp_log.h"
@@ -85,3 +93,5 @@ esp_err_t csi_tx_start(void) {
     BaseType_t ok = xTaskCreatePinnedToCore(tx_task, "csi_tx", 4096, NULL, 5, NULL, 1);
     return ok == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
 }
+
+#endif  // CONFIG_CSI_ROLE_TRANSMITTER

@@ -19,6 +19,7 @@ from csi.downlink import encode_frame as encode_down
 from csi.dsp.preprocess import Preprocessor
 from csi.protocol import (
     HEADER_SIZE,
+    HEADER_SIZE_V1,
     MAGIC,
     VERSION,
     Frame,
@@ -47,13 +48,13 @@ def make_frame(n_sub: int = 64, **kwargs) -> Frame:
     return Frame(**defaults)
 
 
-def test_header_is_22_bytes_with_no_padding():
-    assert HEADER_SIZE == 22
-    assert len(encode_frame(make_frame(64))) == 22 + 128
+def test_header_is_30_bytes_with_no_padding():
+    assert HEADER_SIZE == 30
+    assert len(encode_frame(make_frame(64))) == 30 + 128
 
 
 def test_field_offsets_are_where_the_spec_says():
-    raw = encode_frame(make_frame(64))
+    raw = encode_frame(make_frame(64, src_mac=bytes.fromhex("aabbccddeeff"), link_epoch=7))
 
     assert struct.unpack_from("<H", raw, 0)[0] == MAGIC
     assert raw[0:2] == b"\x53\x43", "magic 0x4353 little-endian is the bytes 53 43"
@@ -66,13 +67,64 @@ def test_field_offsets_are_where_the_spec_says():
     assert raw[18] == 6
     assert raw[19] == 0
     assert struct.unpack_from("<H", raw, 20)[0] == 64
+    assert raw[22:28] == bytes.fromhex("aabbccddeeff")
+    assert raw[28] == 7
+    assert raw[29] == 0, "reserved byte is zero"
+
+
+def test_v2_only_appends_so_v1_offsets_are_untouched():
+    """The property the whole two-version scheme rests on.
+
+    v2 exists because a node on a mesh has to say which access point a frame came through. It
+    was appended rather than woven in so that one struct parses both and, more importantly, so
+    that recordings made before v2 existed still replay — the recorder stores raw datagrams, so
+    dropping v1 would retire the archive rather than merely inconveniencing a device.
+    """
+    frame = make_frame(64)
+    v1 = encode_frame(frame, version=1)
+    v2 = encode_frame(frame, version=2)
+
+    assert len(v1) == HEADER_SIZE_V1 + 128
+    assert v1[:2] == v2[:2]
+    assert v1[3:HEADER_SIZE_V1] == v2[3:HEADER_SIZE_V1], "only the version byte differs"
+    assert v1[HEADER_SIZE_V1:] == v2[HEADER_SIZE:], "payload is the same bytes either way"
+
+
+def test_v1_datagrams_still_parse():
+    original = make_frame(64, src_mac=bytes.fromhex("aabbccddeeff"), link_epoch=7)
+    parsed = parse_frame(encode_frame(original, version=1))
+
+    for field in ("node_id", "seq", "timestamp", "rssi", "noise_floor", "channel", "n_sub"):
+        assert getattr(parsed, field) == getattr(original, field)
+    np.testing.assert_array_equal(parsed.data, original.data)
+    # v1 carries no link information, and the defaults must be the "nothing to report" values
+    # rather than anything nodes.py could mistake for a roam.
+    assert parsed.src_mac == b"\x00" * 6
+    assert parsed.link_epoch == 0
+
+
+def test_unknown_version_is_rejected():
+    raw = bytearray(encode_frame(make_frame()))
+    raw[2] = 99
+    with pytest.raises(ProtocolError, match="unsupported version"):
+        parse_frame(bytes(raw))
 
 
 def test_round_trip_preserves_every_field():
-    original = make_frame(64)
+    original = make_frame(64, src_mac=bytes.fromhex("aabbccddeeff"), link_epoch=7)
     parsed = parse_frame(encode_frame(original))
 
-    for field in ("node_id", "seq", "timestamp", "rssi", "noise_floor", "channel", "n_sub"):
+    for field in (
+        "node_id",
+        "seq",
+        "timestamp",
+        "rssi",
+        "noise_floor",
+        "channel",
+        "n_sub",
+        "src_mac",
+        "link_epoch",
+    ):
         assert getattr(parsed, field) == getattr(original, field)
     np.testing.assert_array_equal(parsed.data, original.data)
 

@@ -22,8 +22,9 @@ static const char *TAG = "csi.capture";
 static csi_ring_t *s_ring;
 static csi_capture_stats_t s_stats;
 static uint32_t s_seq;
-static bool s_filter_enabled;
+static volatile bool s_filter_enabled;
 static uint8_t s_peer[6];
+static volatile uint8_t s_link_epoch;
 static TaskHandle_t s_consumer;
 
 // A scratch buffer owned by the callback. It is only ever touched from the WiFi task, so it
@@ -38,11 +39,19 @@ void csi_capture_set_peer(const uint8_t mac[6]) {
         s_filter_enabled = false;
         return;
     }
+    // Disable, copy, re-enable. This runs from the event task while the callback may be reading
+    // s_peer, and the ordering decides what a race costs: with the flag cleared first, a frame
+    // arriving mid-copy is accepted rather than compared against half of one MAC and half of
+    // another. Accepting one frame too many is harmless; rejecting every frame after a roam
+    // because the comparison tore is not.
+    s_filter_enabled = false;
     memcpy(s_peer, mac, 6);
     s_filter_enabled = true;
     ESP_LOGI(TAG, "filtering CSI to %02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2],
              mac[3], mac[4], mac[5]);
 }
+
+void csi_capture_set_link_epoch(uint8_t epoch) { s_link_epoch = epoch; }
 
 static void IRAM_ATTR csi_callback(void *ctx, wifi_csi_info_t *info) {
     (void)ctx;
@@ -78,6 +87,9 @@ static void IRAM_ATTR csi_callback(void *ctx, wifi_csi_info_t *info) {
     header->channel = info->rx_ctrl.channel;
     header->sec_channel = info->rx_ctrl.secondary_channel;
     header->n_sub = n_sub;
+    memcpy(header->src_mac, info->mac, 6);
+    header->link_epoch = s_link_epoch;
+    header->reserved = 0;
 
     memcpy(s_scratch + sizeof(csi_wire_header_t), info->buf, info->len);
 

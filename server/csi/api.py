@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import Settings
+from .echo import start_echo
 from .hub import Client, Hub
 from .ingest import start_listener
 from .recorder import scan_recording
@@ -28,9 +29,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         await hub.start()
         transport = await start_listener(hub, settings.udp_host, settings.udp_port)
+        echo = None
+        if settings.echo_port:
+            echo = await start_echo(settings.udp_host, settings.echo_port)
         try:
             yield
         finally:
+            if echo is not None:
+                echo.close()
             transport.close()
             await hub.stop()
 

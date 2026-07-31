@@ -1,19 +1,22 @@
 // ESP32-S3 CSI node.
 //
-// Two roles, chosen in menuconfig:
+// Three roles, chosen in menuconfig. The first is the one to start with:
 //
-//   RECEIVER     joins the access point for connectivity, then listens promiscuously and
-//                reports CSI for frames from the transmitter node to the server over UDP.
-//   TRANSMITTER  joins the same access point and emits a small datagram at a fixed rate, so
-//                the receiver has something steady to measure.
+//   STATION      one board, joined to the WiFi you already have. It probes the access point at
+//                a fixed rate and reports CSI for the replies, so the link it measures is
+//                AP-to-node. No second radio to place, power, or configure.
+//   RECEIVER     listens promiscuously and reports CSI for frames from a second ESP32.
+//   TRANSMITTER  that second ESP32: emits a small datagram at a fixed rate.
 //
-// The pair is the plan's topology B, and the reason for it is sampling rate: with a single
-// node harvesting CSI from whatever your router happens to send, you do not control the rate
-// and the spectrum you compute is a spectrum of your router's traffic pattern. Set
-// CSI_ROLE_RECEIVER on one board and CSI_ROLE_TRANSMITTER on the other.
+// RECEIVER + TRANSMITTER is the plan's topology B. It buys a link nobody else shares — you own
+// both endpoints, so the rate is a fact rather than a request — at the cost of a second board.
+// The station role gives that up: the reply rate depends on the access point's load, and the
+// number to watch is the yield in the statistics line below. Start with one board; add the
+// second only if the yield says you have to.
 //
-// Topology A from the plan — one node in station mode, pinging the gateway — is also
-// supported: build a single receiver with CSI_PEER_MAC set to your router's BSSID.
+// On a mesh network, set CSI_LOCK_BSSID. Several access points share the SSID, and being moved
+// between them changes the geometry of every measurement with nothing to show for it in the
+// data. The lock turns a silent steering into a visible disconnect. csi_wifi.c has the detail.
 
 #include <string.h>
 
@@ -24,6 +27,7 @@
 
 #include "csi_capture.h"
 #include "csi_net.h"
+#include "csi_probe.h"
 #include "csi_ring.h"
 #include "csi_tx.h"
 #include "csi_wifi.h"
@@ -35,11 +39,25 @@ static const char *TAG = "csi";
 // the buffer it writes into is still being allocated.
 static csi_ring_t s_ring;
 
+#if CONFIG_CSI_ROLE_STATION
+// Runs on every association. Re-arming the filter here rather than once at startup is what makes
+// a reconnect survivable: with a BSSID lock the address is the same every time, but without one
+// the network is free to hand us a different access point, and a filter still pointing at the
+// old one would reject every frame forever while every counter looked healthy.
+static void on_link_up(const uint8_t bssid[6], uint8_t epoch) {
+    csi_capture_set_peer(bssid);
+    csi_capture_set_link_epoch(epoch);
+}
+#endif
+
 static void report_task(void *arg) {
     (void)arg;
     csi_capture_stats_t capture_prev = {0};
     csi_net_stats_t net_prev = {0};
     const int period_s = CONFIG_CSI_REPORT_PERIOD_S;
+#if CONFIG_CSI_ROLE_STATION
+    csi_probe_stats_t probe_prev = {0};
+#endif
 
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(period_s * 1000));
@@ -64,6 +82,30 @@ static void report_task(void *arg) {
                  (unsigned)capture.filtered, (unsigned)capture.oversize, (unsigned)net.queued,
                  (unsigned)net.send_errors, (unsigned)esp_get_free_heap_size());
 
+#if CONFIG_CSI_ROLE_STATION
+        csi_probe_stats_t probe;
+        csi_probe_get_stats(&probe);
+        const uint32_t probes = probe.probes - probe_prev.probes;
+
+        // Yield is the station role's headline number and has no equivalent in the pair
+        // topology: it is the fraction of probes that came back as a CSI measurement. Well under
+        // 1.0 means the access point is not answering every probe — a busy channel, or a router
+        // rate-limiting ICMP — and it is the honest cost of not owning the link. The reply
+        // counter next to it separates the two ways that can happen: replies arriving without
+        // CSI frames is a capture problem, not a network one.
+        uint8_t bssid[6] = {0};
+        csi_wifi_bssid(bssid);
+        ESP_LOGI(TAG,
+                 "link %02x:%02x:%02x:%02x:%02x:%02x epoch %u | probes %u | replies %u | "
+                 "yield %.0f%% | probe errors %u | disconnects %u",
+                 bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5],
+                 csi_wifi_link_epoch(), (unsigned)probes,
+                 (unsigned)(probe.replies - probe_prev.replies),
+                 probes ? 100.0f * (float)frames / (float)probes : 0.0f,
+                 (unsigned)probe.send_errors, (unsigned)csi_wifi_disconnects());
+        probe_prev = probe;
+#endif
+
         capture_prev = capture;
         net_prev = net;
     }
@@ -73,11 +115,31 @@ void app_main(void) {
     csi_ring_init(&s_ring);
 
     ESP_LOGI(TAG, "node %d starting", CONFIG_CSI_NODE_ID);
+
+#if CONFIG_CSI_ROLE_STATION
+    // Registered before the join, or the first association goes past unseen and capture starts
+    // with no filter and epoch 0.
+    csi_wifi_set_link_cb(on_link_up);
+#endif
+
     ESP_ERROR_CHECK(csi_wifi_start_sta());
 
 #if CONFIG_CSI_ROLE_TRANSMITTER
     ESP_LOGI(TAG, "role: transmitter");
     ESP_ERROR_CHECK(csi_tx_start());
+
+#elif CONFIG_CSI_ROLE_STATION
+    ESP_LOGI(TAG, "role: station");
+
+    // No promiscuous mode here, unlike the receiver role. A station already gets a CSI callback
+    // for the frames the access point addressed to it, and those frames *are* the link we want
+    // to measure. Sniffing the whole channel would only hand the callback more to reject.
+    ESP_ERROR_CHECK(csi_net_start(&s_ring, CONFIG_CSI_SERVER_HOST, CONFIG_CSI_SERVER_PORT));
+    ESP_ERROR_CHECK(csi_capture_start(&s_ring));
+    // Last, and after the join: the default probe target is the DHCP gateway, which does not
+    // exist until there is a lease.
+    ESP_ERROR_CHECK(csi_probe_start());
+
 #else
     ESP_LOGI(TAG, "role: receiver");
 

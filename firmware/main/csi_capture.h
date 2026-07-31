@@ -23,8 +23,16 @@ void csi_capture_stop(void);
 // Only capture frames from this source MAC. Pass NULL to accept every frame.
 // In promiscuous mode without a filter the node reports CSI for every packet in the air,
 // including the neighbours' — which produces a fast, meaningless stream and a very confusing
-// waterfall.
+// waterfall. In the station role the filter is the associated BSSID, which keeps out the
+// broadcast traffic the access point relays from the rest of the house.
+//
+// Safe to call while capture is running: the station role re-arms it on every association.
 void csi_capture_set_peer(const uint8_t mac[6]);
+
+// Stamped into every frame from here on. The callback must not call into csi_wifi to read it —
+// it runs in the WiFi driver task and should touch nothing outside this translation unit — so
+// the value is pushed in from the link callback instead.
+void csi_capture_set_link_epoch(uint8_t epoch);
 
 // The task to wake when a frame lands in the ring. Set before starting capture; passing NULL
 // leaves the consumer to poll.
