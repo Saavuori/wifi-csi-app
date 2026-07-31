@@ -13,16 +13,31 @@ from dataclasses import dataclass
 import numpy as np
 
 MAGIC = 0x4353
-VERSION = 1
+VERSION = 2
 
 # <  little-endian, no padding
 # H  magic      B  version     B  node_id
 # I  seq        Q  timestamp
 # b  rssi       b  noise_floor B  channel   B  sec_channel
 # H  n_sub
-_HEADER = struct.Struct("<HBBIQbbBBH")
-HEADER_SIZE = _HEADER.size
-assert HEADER_SIZE == 22, HEADER_SIZE
+_HEADER_V1 = struct.Struct("<HBBIQbbBBH")
+HEADER_SIZE_V1 = _HEADER_V1.size
+assert HEADER_SIZE_V1 == 22, HEADER_SIZE_V1
+
+# v2 appends, leaving every v1 field at the offset it already had:
+# 6s src_mac    B  link_epoch  B  reserved
+_HEADER_V2 = struct.Struct("<HBBIQbbBBH6sBB")
+HEADER_SIZE = _HEADER_V2.size
+assert HEADER_SIZE == 30, HEADER_SIZE
+assert _HEADER_V2.format.startswith(_HEADER_V1.format), "v2 must extend v1, not rearrange it"
+
+# Both versions are parsed. A node in the field is not upgraded at the same moment the server
+# is, and — more importantly — every recording ever made is a stream of datagrams in whatever
+# version was current when it was captured. Replay hands those exact bytes to this parser, so
+# dropping v1 support would retire the archive.
+_HEADERS = {1: _HEADER_V1, 2: _HEADER_V2}
+
+ZERO_MAC = b"\x00" * 6
 
 # A node that reports more than this is either misconfigured or the packet is garbage that
 # happened to survive the magic check. 512 leaves room past the 256 a Nexmon node will send.
@@ -61,6 +76,16 @@ class Frame:
     # timestamps are the only jitter-free clock we have.
     received_at: float = 0.0
 
+    # v2. Who transmitted the frame this measurement came from — the access point's BSSID for a
+    # station node, the peer node's MAC for the ESP32 pair. A v1 frame reports six zero bytes.
+    src_mac: bytes = ZERO_MAC
+    # v2. Increments on the node every time it associates. A change means the link is not the
+    # link it was — a roam, a reconnect, the access point changing channel — and every baseline
+    # built on the old one is void, so `nodes.py` treats it exactly as it treats a reboot.
+    # Always 0 on v1 frames, and a node never mixes versions, so a v1 stream simply never
+    # reports a roam.
+    link_epoch: int = 0
+
     @property
     def imag(self) -> np.ndarray:
         return self.data[0::2]
@@ -87,18 +112,22 @@ class Frame:
         return encode_frame(self)
 
 
-def encode_frame(frame: Frame) -> bytes:
+def encode_frame(frame: Frame, *, version: int = VERSION) -> bytes:
     """Serialize a Frame back to its uplink datagram.
 
     Only the recorder's tests and the synthetic generator need this — the server never sends
     uplink frames in production. Keeping it here means encode and decode cannot drift.
+
+    `version` exists so the tests can build a v1 datagram and prove it still parses.
     """
+    if version not in _HEADERS:
+        raise ProtocolError(f"cannot encode version {version}")
     data = np.ascontiguousarray(frame.data, dtype=np.int8)
     if data.size != 2 * frame.n_sub:
         raise ProtocolError(f"data has {data.size} bytes, expected {2 * frame.n_sub}")
-    header = _HEADER.pack(
+    fields = [
         MAGIC,
-        VERSION,
+        version,
         frame.node_id,
         frame.seq & 0xFFFFFFFF,
         frame.timestamp & 0xFFFFFFFFFFFFFFFF,
@@ -107,8 +136,10 @@ def encode_frame(frame: Frame) -> bytes:
         frame.channel,
         frame.sec_channel,
         frame.n_sub,
-    )
-    return header + data.tobytes()
+    ]
+    if version >= 2:
+        fields += [bytes(frame.src_mac).ljust(6, b"\x00")[:6], frame.link_epoch & 0xFF, 0]
+    return _HEADERS[version].pack(*fields) + data.tobytes()
 
 
 def parse_frame(buf: bytes | bytearray | memoryview, *, received_at: float = 0.0) -> Frame:
@@ -117,12 +148,21 @@ def parse_frame(buf: bytes | bytearray | memoryview, *, received_at: float = 0.0
     A trailing-bytes datagram is rejected rather than truncated: silently accepting the prefix
     would let a subcarrier-count mismatch masquerade as valid data for hours.
     """
-    if len(buf) < HEADER_SIZE:
-        raise ProtocolError(f"datagram too short: {len(buf)} < {HEADER_SIZE}")
+    if len(buf) < HEADER_SIZE_V1:
+        raise ProtocolError(f"datagram too short: {len(buf)} < {HEADER_SIZE_V1}")
+
+    magic, version = struct.unpack_from("<HB", buf, 0)
+    if magic != MAGIC:
+        raise ProtocolError(f"bad magic 0x{magic:04x}")
+    header = _HEADERS.get(version)
+    if header is None:
+        raise ProtocolError(f"unsupported version {version}")
+    if len(buf) < header.size:
+        raise ProtocolError(f"datagram too short for v{version}: {len(buf)} < {header.size}")
 
     (
-        magic,
-        version,
+        _magic,
+        _version,
         node_id,
         seq,
         timestamp,
@@ -131,20 +171,19 @@ def parse_frame(buf: bytes | bytearray | memoryview, *, received_at: float = 0.0
         channel,
         sec_channel,
         n_sub,
-    ) = _HEADER.unpack_from(buf, 0)
+        *extra,
+    ) = header.unpack_from(buf, 0)
 
-    if magic != MAGIC:
-        raise ProtocolError(f"bad magic 0x{magic:04x}")
-    if version != VERSION:
-        raise ProtocolError(f"unsupported version {version}")
     if n_sub == 0 or n_sub > MAX_SUBCARRIERS:
         raise ProtocolError(f"implausible n_sub {n_sub}")
 
-    expected = HEADER_SIZE + 2 * n_sub
+    expected = header.size + 2 * n_sub
     if len(buf) != expected:
         raise ProtocolError(f"length {len(buf)} != {expected} implied by n_sub={n_sub}")
 
-    data = np.frombuffer(bytes(buf[HEADER_SIZE:expected]), dtype=np.int8)
+    src_mac, link_epoch = (extra[0], extra[1]) if extra else (ZERO_MAC, 0)
+
+    data = np.frombuffer(bytes(buf[header.size : expected]), dtype=np.int8)
     return Frame(
         node_id=node_id,
         seq=seq,
@@ -156,14 +195,20 @@ def parse_frame(buf: bytes | bytearray | memoryview, *, received_at: float = 0.0
         n_sub=n_sub,
         data=data,
         received_at=received_at,
+        src_mac=src_mac,
+        link_epoch=link_epoch,
     )
 
 
 def peek_n_sub(buf: bytes) -> int:
-    """Subcarrier count without building a Frame — used when scanning recordings for an index."""
-    if len(buf) < HEADER_SIZE:
+    """Subcarrier count without building a Frame — used when scanning recordings for an index.
+
+    Version-independent: `n_sub` sits at the same offset in both, which is the point of having
+    appended to v1 rather than rearranged it.
+    """
+    if len(buf) < HEADER_SIZE_V1:
         raise ProtocolError("datagram too short")
-    return _HEADER.unpack_from(buf, 0)[9]
+    return _HEADER_V1.unpack_from(buf, 0)[9]
 
 
 # --------------------------------------------------------------------------------------

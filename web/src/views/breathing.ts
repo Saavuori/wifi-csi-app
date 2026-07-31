@@ -36,7 +36,13 @@ export function vitalsView(band: Band): View {
 
     if (latest === null) {
       bpmValue.textContent = "—";
-      detail.textContent = "not enough history in the window yet";
+      // A blank panel reads as a broken server. When the server declined for a reason worth
+      // acting on — a hole in the link long enough that interpolating across it would have
+      // invented a breathing peak — say so, because the fix is on the network, not here.
+      const rejected = isHeart ? current?.heart_rejected : current?.breathing_rejected;
+      detail.textContent = rejected
+        ? `no estimate — ${rejected}`
+        : "not enough history in the window yet";
       return;
     }
 

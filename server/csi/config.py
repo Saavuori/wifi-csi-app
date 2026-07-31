@@ -43,6 +43,11 @@ class Settings:
     http_host: str = field(default_factory=lambda: _env("CSI_HTTP_HOST", "0.0.0.0"))
     http_port: int = field(default_factory=lambda: _env_int("CSI_HTTP_PORT", 8080))
 
+    # Echo port for single-board station nodes configured with CSI_PROBE_UDP_ECHO. Off unless
+    # asked for: it is only needed when the node's router will not answer pings, and a port that
+    # reflects whatever it is sent should not be open by default.
+    echo_port: int = field(default_factory=lambda: _env_int("CSI_ECHO_PORT", 0))
+
     data_dir: Path = field(
         default_factory=lambda: Path(_env("CSI_DATA_DIR", "./data")).expanduser()
     )

@@ -9,15 +9,19 @@ a future Raspberry Pi running Nexmon at 256 subcarriers, and a replayed public d
 just producers into that format. Nothing downstream knows or cares which it is looking at.
 
 ```
-  ESP32-S3 (TX)  ──100 Hz──►  air  ──►  ESP32-S3 (RX)  ──UDP──►  server  ──WebSocket──►  browser
-                                          promiscuous              ingest                 waterfall
-                                          CSI callback             record  ◄──replay──►   motion
-                                                                   analyse                breathing
+   mesh AP  ◄──ping 100 Hz──  ESP32-S3  ──UDP──►  server  ──WebSocket──►  browser
+      │                       station           ingest                    waterfall
+      └────echo reply────►    CSI callback      record  ◄──replay──►      motion
+                                                analyse                   breathing
 ```
+
+One board. It joins the WiFi you already have, pings the gateway at a fixed rate, and reports
+CSI for each reply — so the link it measures is the one between the board and the access point,
+and the sampling rate is a property of the node rather than of the household's traffic.
 
 | Directory | What it is |
 |---|---|
-| `firmware/` | ESP-IDF project for the nodes. One image, two roles. |
+| `firmware/` | ESP-IDF project for the node. One image, three roles. |
 | `server/` | Python: UDP ingest, recorder, replayer, DSP, HTTP + WebSocket. |
 | `web/` | TypeScript + canvas front end. No framework. |
 | `docs/` | Wire formats. |
@@ -49,9 +53,18 @@ For front-end work, `cd web && npm run dev` proxies `/api` and `/ws` to the Pyth
 ## With hardware
 
 Read `firmware/README.md` first — it lists the handful of settings that decide whether the
-capture works at all, and why. In short: flash one board as transmitter and one as receiver,
-put the transmitter's MAC in the receiver's `CSI_PEER_MAC`, point `CSI_SERVER_HOST` at this
-server, and watch the Node health view for a stable rate and sub-1% loss.
+capture works at all, and why. In short:
+
+1. Flash one board with your SSID and `CSI_SERVER_HOST` pointing at this server.
+2. Read the boot scan. It lists every access point on your SSID with channel and RSSI — on a
+   mesh, that is several, and the phone app does not show them to you.
+3. Pick the one whose line to the node crosses the doorway, bed, or hallway you care about, and
+   put its BSSID in `CSI_LOCK_BSSID`. **That choice is the placement decision.** The system
+   senses along that line; the node is one end of it and you do not get to move the other.
+4. Reflash and watch the Node health view for a stable rate, sub-1% loss, and `roams` at zero.
+
+If `roams` climbs, the mesh is still moving the node between access points and every calibration
+dies with each move. Fix that before trusting anything downstream of it.
 
 ## The phases
 
@@ -59,7 +72,7 @@ Numbered as in the build plan.
 
 | Phase | Where | State |
 |---|---|---|
-| 1 — Firmware | `firmware/` | Implemented; the ring and wire layout have host tests, the radio path needs boards |
+| 1 — Firmware | `firmware/` | Implemented; the ring and wire layout have host tests, the radio path and the probe yield need a board |
 | 2 — Ingest + recorder | `server/csi/{ingest,recorder,replay,sessions}.py` | Implemented and tested |
 | 3 — Waterfall | `web/src/views/waterfall.ts` | Implemented |
 | 4 — Motion + presence | `server/csi/dsp/{presence,selection}.py` | Implemented and tested |
@@ -69,7 +82,10 @@ Numbered as in the build plan.
 ### Exit criteria, and how to check them
 
 - **Phase 1** — "stable ~80 Hz, sequence gaps under 1% over ten minutes, board stays cool."
-  The first two are on the Node health view, measured continuously from device timestamps.
+  The first two are on the Node health view, measured continuously from device timestamps. With
+  a single node the rate is only as steady as the access point's willingness to answer, so read
+  it alongside the yield in the node's own statistics log: a rate of 60 Hz at a 100 Hz probe
+  rate is the link being busy, not the board being slow.
 - **Phase 2** — "a recording replays byte-identically through the live pipeline." This is a
   property of the format rather than something to keep re-testing: recordings store the raw
   datagrams, and the replayer hands the same bytes to the same parser the UDP listener uses.
@@ -100,6 +116,13 @@ maximized by a carrier that never changes. So: drop the bottom quantile by mean 
 a 1 s window to 0.09 at 20 s. It is a slider in the UI because the effect is large enough to
 watch happen.
 
+**A hole in the stream is refused, not interpolated over.** `np.interp` cannot fail: hand it a
+window with two seconds missing and it draws a straight line across, returns an array of exactly
+the right length, and says nothing. A ramp lasting seconds has its fundamental in the 0.1–0.5 Hz
+respiration band, so the estimator that follows produces a confident number describing the
+network. Windows whose largest gap exceeds 0.5 s are declined with a reason instead. This is the
+failure mode a node sharing an access point has and a dedicated transmitter pair does not.
+
 **Everything is computed server-side, identically for live and replayed frames.** That is what
 makes a recording a faithful stand-in for the room, and it is why the recorder exists before
 any of the analysis does.
@@ -120,7 +143,7 @@ pipeline rather than by reading it:
 ## Tests
 
 ```sh
-.venv/bin/python -m pytest server/tests      # 115 tests
+.venv/bin/python -m pytest server/tests      # 122 tests
 firmware/scripts/run_host_tests.sh           # ring buffer + wire layout, no hardware needed
 cd web && npm run build                      # typecheck + bundle
 ```
@@ -133,6 +156,7 @@ Environment variables, all optional:
 |---|---|---|
 | `CSI_UDP_PORT` | 5566 | Where nodes send frames |
 | `CSI_HTTP_PORT` | 8080 | API and web app |
+| `CSI_ECHO_PORT` | unset | Opens a UDP echo responder for station nodes built with `CSI_PROBE_UDP_ECHO`. Only needed when the router will not answer pings; a port that reflects whatever it is sent should not be open by default |
 | `CSI_DATA_DIR` | `./data` | Recordings and `sessions.json` |
 | `CSI_WEB_DIR` | `../web/dist` | Built front end; unset serves the API only |
 | `CSI_RECORD` | `true` | Auto-start a recording at boot. Losing a session is far more expensive than the disk — a node at 80 Hz writes about 1 GB/day |
@@ -148,9 +172,21 @@ activity record, a genuinely nice CSI visualization tool.
 antennas on one radio or a much denser mesh. Single-link amplitude-only is one scalar view of
 the room.
 
+**The link is shared.** With one node the far end is an access point serving the whole house, so
+the sample rate and the reply yield depend on how busy it is. Expect Phase 1's "gaps under 1%"
+to be harder to hit in the evening than at 3 a.m., and read the yield next to the rate. A second
+board — flashed as a transmitter, giving a link nobody else touches — remains the answer if that
+turns out to matter, and the pipeline already supports it: nothing in the format or the analysis
+knows how many nodes there are.
+
 Two separate ESP32s do **not** give CSI-ratio benefits. That trick cancels carrier frequency
 offset because both antennas share one oscillator; separate boards have independent clocks.
 This is an amplitude-only system throughout — there is no phase unwrapping anywhere, on purpose.
+
+**A mesh is not only a cost.** Several access points on one SSID means several candidate sensing
+lines through the house, and you get to pick which one by choosing the BSSID to lock to. A
+second node later, locked to a *different* access point, adds a second line for the price of a
+board — the server has been multi-node since the first commit.
 
 **Deferred upgrades:** HT40 for 128 subcarriers, a plane reflector behind the PIFA, a Raspberry
 Pi + Nexmon node for 256 subcarriers at 80 MHz. All three drop into the same ingest format

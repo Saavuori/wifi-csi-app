@@ -245,6 +245,50 @@ def test_reboot_is_detected_and_reported():
     assert health.missing < 10
 
 
+def test_link_epoch_change_is_a_discontinuity():
+    """A roam is the mesh-network failure a reboot check cannot catch.
+
+    When a mesh steers the node to a different access point, the sequence numbers stay
+    continuous and the device clock keeps running — nothing in the frames says anything
+    happened. What did happen is that the far end of the link moved to a different room, so
+    every baseline built from the old one is measuring geometry that no longer exists.
+    """
+    health = NodeHealth(node_id=1)
+    scene = Scene(SceneConfig())
+
+    frames = []
+    while len(frames) < 100:
+        frame = scene.next_frame()
+        if frame is not None:
+            frames.append(frame)
+
+    for frame in frames[:-1]:
+        frame.link_epoch = 4
+        assert health.observe(frame) is False
+
+    roamed = frames[-1]
+    roamed.link_epoch = 5
+    assert health.observe(roamed) is True
+    assert health.roams == 1
+    assert health.reboots == 0, "a roam is not a reboot and must not be reported as one"
+    assert health.missing == 0, "sequence numbers were continuous across it"
+    # The interval spanning the outage is not a sample period. Left in the rate estimate it
+    # would drag the reported rate down for the next 256 frames.
+    assert health.rate_hz == 0.0
+
+
+def test_a_v1_node_never_reports_a_roam():
+    """v1 frames carry no epoch, so they all read as 0 — which must be a steady state, not a
+    roam on the first frame and never again."""
+    health = NodeHealth(node_id=1)
+    scene = Scene(SceneConfig())
+    for _ in range(100):
+        frame = scene.next_frame()
+        if frame is not None:
+            assert health.observe(frame) is False
+    assert health.roams == 0
+
+
 def test_duplicate_frames_are_not_counted_as_gaps():
     health = NodeHealth(node_id=1)
     scene = Scene(SceneConfig())

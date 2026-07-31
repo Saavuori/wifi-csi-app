@@ -172,9 +172,20 @@ class Hub:
             self.nodes[frame.node_id] = state
             log.info("node %d appeared: %d subcarriers", frame.node_id, frame.n_sub)
 
-        rebooted = state.health.observe(frame, now=received_at)
-        if rebooted:
-            log.info("node %d rebooted; clearing history", frame.node_id)
+        roams_before = state.health.roams
+        if state.health.observe(frame, now=received_at):
+            if state.health.roams > roams_before:
+                # Not an error, and on a mesh network not even unusual — but it does cost the
+                # presence detector its calibration, so it is logged at the same level as a
+                # reboot rather than buried. A node that does this repeatedly wants CSI_LOCK_BSSID.
+                log.info(
+                    "node %d re-associated with %s (link epoch %d); clearing history",
+                    frame.node_id,
+                    state.health.src_mac.hex(":"),
+                    frame.link_epoch,
+                )
+            else:
+                log.info("node %d rebooted; clearing history", frame.node_id)
             state.reset()
 
         if replay:
@@ -343,11 +354,18 @@ class Hub:
         breathing = state.breathing.estimate(ring)
         if breathing is not None:
             out["breathing"] = breathing.as_dict()
+        elif state.breathing.last_rejection:
+            # Named rather than silent. A breathing panel that just goes blank looks like a
+            # broken server; one that says the link had a two-second hole in it points at the
+            # actual problem, which on a shared access point is usually the network being busy.
+            out["breathing_rejected"] = state.breathing.last_rejection
 
         if self.settings.heart.window_s > 0 and len(ring) > 64:
             heart = state.heart.estimate(ring)
             if heart is not None:
                 out["heart"] = heart.as_dict()
+            elif state.heart.last_rejection:
+                out["heart_rejected"] = state.heart.last_rejection
 
         # The placement tuner wants one number that responds immediately to the node being
         # moved, so it runs on a short window regardless of the breathing window setting.
