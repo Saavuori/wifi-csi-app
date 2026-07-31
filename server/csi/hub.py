@@ -56,6 +56,12 @@ log = logging.getLogger("csi.hub")
 CLIENT_QUEUE = 256
 
 
+def _same_mask(a: np.ndarray, b: np.ndarray) -> bool:
+    """`valid_mask` is memoized and returns a read-only shared array, so the identity check hits
+    on every frame that did not change the mask — which is all of them but one."""
+    return a is b or np.array_equal(a, b)
+
+
 def _section(patch: dict, name: str) -> dict:
     """One block of a config patch. A non-object where an object was expected is an empty one —
     `patch["presence"] = 3` should change nothing, not raise."""
@@ -139,9 +145,32 @@ class NodeState:
         self.analyzing = False
         self._pending: str | None = None
 
-    def ensure_ring(self, n_sub: int) -> FrameRing:
+    def ensure_ring(self, processed: Processed) -> FrameRing:
+        """The ring for this node, rebuilt or cleared when the frames stop being comparable.
+
+        Two things make a stored row incomparable with a new one, and only the first is obvious.
+        The bandwidth changing moves `n_sub`, so the matrix no longer fits and the ring is
+        rebuilt.
+
+        A mask change does not move anything. The array is the same width, and the rows written
+        under the old mask carry NaN at exactly the subcarriers the new mask calls valid — so a
+        window straddling the change is a matrix with NaN columns that the analyzers select
+        *because* the mask says they are good. Nothing downstream tolerates that:
+        `uniform_resample` smears the NaN across the column, `welch` refuses outright, and the
+        whole metrics pass dies. It stays dead until the last pre-change row ages out of the
+        ring, which at the default history is two minutes of no breathing, no presence and no
+        node health for every node — from unticking one checkbox in the UI.
+
+        So a mask change is treated as the discontinuity it is: throw the history away, exactly
+        as for a reboot. Comparing the mask itself rather than the setting that produced it
+        means any future reason for the mask to move is covered by the same check.
+        """
+        n_sub = processed.frame.n_sub
         if self.ring is None or self.ring.n_sub != n_sub:
             self.ring = FrameRing(n_sub, self.settings.ring_capacity())
+        elif len(self.ring) > 0 and not _same_mask(self.ring.mask, processed.mask):
+            log.info("node %d: subcarrier mask changed; clearing history", self.node_id)
+            self.reset()
         return self.ring
 
     def reset(self) -> None:
@@ -271,7 +300,7 @@ class Hub:
                 self.recorder.write(datagram, frame)
 
         processed = state.pre.process(frame)
-        state.ensure_ring(frame.n_sub).push(processed)
+        state.ensure_ring(processed).push(processed)
         self._fan_out_frame(processed, replay=replay)
 
     def _fan_out_frame(self, processed: Processed, *, replay: bool) -> None:
