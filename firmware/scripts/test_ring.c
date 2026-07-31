@@ -157,6 +157,17 @@ static void test_drop_on_full(void) {
     printf("ring full: drops rather than blocking\n");
 }
 
+static void test_reporting_a_ring_that_was_never_started(void) {
+    // The reporting task runs in every role, but the transmitter role starts neither capture nor
+    // the sender — so both of their ring pointers are still NULL when it asks them for numbers.
+    // Reading through one on an ESP32 is a LoadProhibited panic, and the node comes straight back
+    // up into the same one a report period later.
+    assert(csi_ring_count(NULL) == 0);
+    assert(csi_ring_dropped(NULL) == 0);
+
+    printf("reporting: an unstarted ring reads as empty rather than faulting\n");
+}
+
 static void test_concurrent(void) {
     csi_ring_init(&g_ring);
     g_producer_done = 0;
@@ -179,6 +190,7 @@ int main(void) {
     test_wire_layout();
     test_ring_basics();
     test_drop_on_full();
+    test_reporting_a_ring_that_was_never_started();
     test_concurrent();
     printf("all firmware host tests passed\n");
     return 0;

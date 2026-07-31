@@ -1,5 +1,6 @@
 #include "csi_ring.h"
 
+#include <stddef.h>
 #include <string.h>
 
 // Head and tail are free-running counters, masked on use. That removes the classic
@@ -52,10 +53,14 @@ void csi_ring_pop_done(csi_ring_t *ring) {
     __atomic_store_n(&ring->tail, ring->tail + 1, __ATOMIC_RELEASE);
 }
 
+// NULL reads as an empty ring. Both accessors exist to be printed by the reporting task, which
+// runs in every role — including the transmitter, which starts neither capture nor the sender
+// and so leaves both of their ring pointers NULL. Reading through one of those on an ESP32 is a
+// LoadProhibited panic, and the node reboots into it again ten seconds later.
 uint32_t csi_ring_count(const csi_ring_t *ring) {
-    return ring->head - ring->tail;
+    return ring != NULL ? ring->head - ring->tail : 0;
 }
 
 uint32_t csi_ring_dropped(const csi_ring_t *ring) {
-    return ring->dropped;
+    return ring != NULL ? ring->dropped : 0;
 }
