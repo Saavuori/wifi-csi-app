@@ -58,5 +58,7 @@ bool csi_ring_push(csi_ring_t *ring, const void *src, size_t len);
 const csi_slot_t *csi_ring_peek(csi_ring_t *ring);
 void csi_ring_pop_done(csi_ring_t *ring);
 
+// Reporting accessors. A NULL ring reads as empty rather than faulting, because the reporting
+// task runs in every role and not every role starts a ring.
 uint32_t csi_ring_count(const csi_ring_t *ring);
 uint32_t csi_ring_dropped(const csi_ring_t *ring);

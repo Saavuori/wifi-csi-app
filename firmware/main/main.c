@@ -54,9 +54,22 @@ static void on_link_up(const uint8_t bssid[6], uint8_t epoch) {
 
 static void report_task(void *arg) {
     (void)arg;
+    const int period_s = CONFIG_CSI_REPORT_PERIOD_S;
+
+#if CONFIG_CSI_ROLE_TRANSMITTER
+    // The transmitter starts neither capture nor the sender, so it has no ring, no frames and
+    // no datagrams — reporting their counters would be printing zeros about subsystems that do
+    // not exist, which reads as a broken node rather than a working one. The one thing worth
+    // watching here is that the board is still alive and not leaking.
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(period_s * 1000));
+        ESP_LOGI(TAG, "transmitting | uptime %llu s | heap %u",
+                 (unsigned long long)(esp_timer_get_time() / 1000000),
+                 (unsigned)esp_get_free_heap_size());
+    }
+#else
     csi_capture_stats_t capture_prev = {0};
     csi_net_stats_t net_prev = {0};
-    const int period_s = CONFIG_CSI_REPORT_PERIOD_S;
 #if CONFIG_CSI_ROLE_STATION
     csi_probe_stats_t probe_prev = {0};
 #endif
@@ -112,6 +125,7 @@ static void report_task(void *arg) {
         capture_prev = capture;
         net_prev = net;
     }
+#endif  // CONFIG_CSI_ROLE_TRANSMITTER
 }
 
 void app_main(void) {
