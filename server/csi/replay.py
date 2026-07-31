@@ -62,22 +62,21 @@ class Replayer:
         self._stamps = [entry[0] for entry in self._index]
         self._seek_to: int | None = None
         self._stop = False
-        self._resume = asyncio.Event()
-        self._resume.set()
-        # Set whenever something wants the pump's attention while it is waiting for a frame to
-        # fall due. See `_sleep_until_due`.
-        self._wake = asyncio.Event()
+        # One doorbell, rung by `resume`, `seek` and `stop`, for both of the places the pump
+        # waits: parked while paused, and waiting for a frame to fall due. Purely a wakeup, never
+        # the pause state itself — `playing` is that. Keeping the two apart is what stops a seek
+        # from resuming a paused replay; see `_await_resume` and `_sleep_until_due`.
+        self._gate = asyncio.Event()
 
     # -- controls ------------------------------------------------------------------------
 
     def pause(self) -> None:
         self.playing = False
-        self._resume.clear()
         self._emit()
 
     def resume(self) -> None:
         self.playing = True
-        self._resume.set()
+        self._gate.set()
         self._emit()
 
     def set_speed(self, speed: float) -> None:
@@ -87,14 +86,14 @@ class Replayer:
         self._emit()
 
     def seek(self, t_us: int) -> None:
+        # Wakes the pump so it can restart the file at the new offset, but deliberately does not
+        # touch `playing`: scrubbing the timeline of a paused replay leaves it paused.
         self._seek_to = int(t_us)
-        self._resume.set()
-        self._wake.set()
+        self._gate.set()
 
     def stop(self) -> None:
         self._stop = True
-        self._resume.set()
-        self._wake.set()
+        self._gate.set()
 
     def state(self) -> dict:
         return {
@@ -144,7 +143,9 @@ class Replayer:
                 if self._stop:
                     return
                 if not self.playing:
-                    await self._resume.wait()
+                    await self._await_resume()
+                    if self._stop:
+                        return
                 if self._seek_to is not None:
                     return  # unwind so run() can restart the file at the new offset
 
@@ -191,12 +192,35 @@ class Replayer:
         window would not be noticed until the far side of the gap, long past the two seconds the
         hub is willing to wait before it gives up — so the stop path has to be able to reach into
         the wait rather than only being seen between frames.
+
+        Clearing `_gate` here cannot swallow a resume, because this is only reached with the
+        replay already playing. Same clear-then-check-then-wait order as `_await_resume`, for the
+        same reason: a stop or seek landing between the check and the wait must not be lost.
         """
-        self._wake.clear()
+        self._gate.clear()
         if self._stop or self._seek_to is not None:
             return
         with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(self._wake.wait(), delay)
+            await asyncio.wait_for(self._gate.wait(), delay)
+
+    async def _await_resume(self) -> None:
+        """Park while paused. Returns on resume, on stop, or on a seek.
+
+        The pause state used to *be* the event: `pause` cleared it and `resume` set it. That made
+        it the only way to wake a parked pump, so `seek` had to set it too — which unblocked the
+        wait and left the latch open. `run()` would then restart the file at the new offset and
+        stream at full rate with `playing` still False, so the browser showed "paused" over a
+        replay that was running. Scrubbing the timeline of a paused replay is precisely when you
+        least want it to start playing.
+
+        So `playing` is the state and `_gate` is only a doorbell. Clear-then-check-then-wait, so
+        a resume landing between the check and the wait cannot be lost.
+        """
+        while True:
+            self._gate.clear()
+            if self.playing or self._stop or self._seek_to is not None:
+                return
+            await self._gate.wait()
 
     def _offset_for(self, t_us: int) -> int:
         """Byte offset of the last indexed frame at or before `t_us`. 0 if there is no index."""

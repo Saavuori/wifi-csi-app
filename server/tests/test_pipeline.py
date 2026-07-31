@@ -674,3 +674,39 @@ async def test_a_slow_replay_stop_still_closes_the_recording(settings):
     assert hub.replayer is None
     assert live.ended_at is not None, "the recording must be closed even if the replay stalls"
     assert live.as_dict()["active"] is False
+async def test_seeking_a_paused_replay_leaves_it_paused(settings):
+    """Scrubbing the timeline must not start playback. The UI scrub bar fires a seek on every
+    drag, and a paused replay that quietly runs is a replay whose position lies."""
+    from csi.replay import Replayer
+
+    store = SessionStore(settings.recordings_dir)
+    session = store.create("overnight")
+    recorder = Recorder(store, session)
+    written = datagrams(2000)
+    for blob in written:
+        recorder.write(blob, parse_frame(blob))
+    recorder.close()
+
+    seen: list[bytes] = []
+    replayer = Replayer(store.file_for(session), lambda d, t: seen.append(d), speed=1.0)
+    task = asyncio.create_task(replayer.run())
+    await asyncio.sleep(0.2)
+
+    replayer.pause()
+    await asyncio.sleep(0.1)
+
+    replayer.seek(parse_frame(written[500]).timestamp)
+    await asyncio.sleep(0.3)
+    before = len(seen)
+    await asyncio.sleep(0.3)
+
+    assert replayer.state()["playing"] is False
+    assert len(seen) == before, "a seek must not resume a paused replay"
+
+    replayer.resume()
+    await asyncio.sleep(0.2)
+    assert len(seen) > before, "resume after a seek must still play"
+    assert seen[before] == written[500], "and must play from where it was scrubbed to"
+
+    replayer.stop()
+    await asyncio.wait_for(task, timeout=2.0)
