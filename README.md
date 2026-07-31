@@ -60,6 +60,47 @@ and starts tracking the scenario, and the breathing view settles near 14.
 For front-end work, `cd web && npm run dev` proxies `/api` and `/ws` to the Python server on
 8080 and gives you hot reload.
 
+## Quick start on Windows, with the boards already flashed
+
+Same command, different path separator — the venv puts its interpreter in `Scripts\` rather than
+`bin/`, and `python -m csi` is the same module either way:
+
+```sh
+CSI_WEB_DIR=web/dist CSI_ECHO_PORT=5568 .venv/Scripts/python.exe -m csi
+```
+
+`CSI_ECHO_PORT` is read only on the branch that ships the station firmware; see the note at the
+end of the next section. It is harmless here and required there.
+
+Three things decide whether frames actually arrive, and each fails silently in its own way:
+
+- **The server must listen on the address the node was flashed with.** `CSI_SERVER_HOST` is
+  baked into the image; check it against `ipconfig` before blaming the radio. There is no
+  discovery and there is deliberately no fallback.
+- **`CSI_ECHO_PORT` must be set when the nodes were built with `CSI_PROBE_UDP_ECHO`.** A station
+  node generates its own CSI by probing and reporting the reply, so with nothing answering the
+  probes the rate collapses to whatever incidental traffic the link carries — about 0.1 Hz here,
+  which looks exactly like a dead node without saying so. The responder is off by default because
+  a port that reflects whatever it is sent should not be open unless something needs it.
+- **The wire version must match the firmware.** `CSI_WIRE_VERSION` is pinned on both ends and the
+  server rejects anything else, one `unsupported version N` warning per datagram. That log line
+  is the diagnostic: the boards are fine, the branch is wrong.
+
+Verified against two ESP32-S3 nodes on 2026-07-31: node 11 held **94.7 Hz with 0.00% loss and
+zero gaps over 26,471 frames**, 64 subcarriers, RSSI −82 dBm, 5.2 ms jitter, no reboots and no
+roams. The waterfall reacts to an arm wave within a frame or two, which is the phase-3 exit
+criterion.
+
+![The waterfall on live CSI](docs/screenshot-live.png)
+
+The horizontal bands with no data are the guard and DC subcarriers — HT20 carries 64 bins but
+only 52 of them are populated, so an empty stripe around index 32 is the format, not a fault.
+
+![Node health](docs/screenshot-node-health.png)
+
+Node 10 is the same link seen from the other mesh access point and idles below 1 Hz, so it shows
+as offline. Selecting a node in the header is what picks the link the analysis runs on.
+
 ## With hardware
 
 Read `firmware/README.md` first — it lists the handful of settings that decide whether the
@@ -67,13 +108,19 @@ capture works at all, and why. In short: flash one board as transmitter and one 
 put the transmitter's MAC in the receiver's `CSI_PEER_MAC`, point `CSI_SERVER_HOST` at this
 server, and watch the Node health view for a stable rate and sub-1% loss.
 
+The single-node station topology the screenshots above were taken on — one board joined to an
+existing mesh, probing the access point rather than a second board — lives on
+`claude/esp32-mesh-wifi-single` and is not merged here yet. It carries the UDP echo responder
+and wire version 2; this branch is version 1 and will reject its frames outright. Run the server
+from that worktree until the two are merged.
+
 ## The phases
 
 Numbered as in the build plan.
 
 | Phase | Where | State |
 |---|---|---|
-| 1 — Firmware | `firmware/` | Implemented; the ring and wire layout have host tests, the radio path needs boards |
+| 1 — Firmware | `firmware/` | Implemented; the ring and wire layout have host tests, and the radio path has now run on boards at 94.7 Hz with zero loss |
 | 2 — Ingest + recorder | `server/csi/{ingest,recorder,replay,sessions}.py` | Implemented and tested |
 | 3 — Waterfall | `web/src/views/waterfall.ts` | Implemented |
 | 4 — Motion + presence | `server/csi/dsp/{presence,selection}.py` | Implemented and tested |
@@ -83,7 +130,10 @@ Numbered as in the build plan.
 ### Exit criteria, and how to check them
 
 - **Phase 1** — "stable ~80 Hz, sequence gaps under 1% over ten minutes, board stays cool."
-  The first two are on the Node health view, measured continuously from device timestamps.
+  The first two are on the Node health view, measured continuously from device timestamps. Met
+  on hardware: 94.7 Hz and 0.00% loss across 26,471 frames, on a board that had been up 5h38m
+  with no reboots. The ten-minute soak and the thermal check are still worth doing on a board
+  you intend to leave running.
 - **Phase 2** — "a recording replays byte-identically through the live pipeline." This is a
   property of the format rather than something to keep re-testing: recordings store the raw
   datagrams, and the replayer hands the same bytes to the same parser the UDP listener uses.
