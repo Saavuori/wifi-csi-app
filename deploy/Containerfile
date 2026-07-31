@@ -1,7 +1,10 @@
 # Two stages: build the front end with node, run with python. The runtime image has no node in
 # it — the web app is static files by the time the server serves them.
 
-FROM docker.io/library/node:22-alpine AS web
+# Pinned to the *build* platform, not the target. The output of this stage is JavaScript, which
+# has no architecture, so there is no reason to run tsc and vite under QEMU when cross-building
+# the arm64 image for a Raspberry Pi. That emulation is the slowest thing in the whole build.
+FROM --platform=$BUILDPLATFORM docker.io/library/node:22-alpine AS web
 
 WORKDIR /build
 COPY web/package.json web/package-lock.json* ./
@@ -11,6 +14,11 @@ RUN npm run build
 
 
 FROM docker.io/library/python:3.12-slim
+
+# Links the published GHCR package back to this repository, which is also what lets the package
+# inherit the repo's visibility instead of being an orphan that has to be made public by hand.
+LABEL org.opencontainers.image.source="https://github.com/Saavuori/wifi-csi-app" \
+      org.opencontainers.image.description="WiFi CSI ingest, recording, replay and analysis"
 
 # scipy needs a BLAS at runtime. Installing it here rather than letting pip pull a wheel that
 # bundles its own keeps the image smaller and the numerics consistent with the base distro.
@@ -32,6 +40,13 @@ ENV CSI_WEB_DIR=/app/web/dist \
     CSI_UDP_PORT=5566 \
     CSI_HTTP_PORT=8080 \
     PYTHONUNBUFFERED=1
+
+# One BLAS thread. Every matrix in the analysis path is small — a few hundred samples by a few
+# dozen subcarriers — and at that size OpenBLAS's threading costs more in synchronization than
+# it saves. On a four-core Pi it is worse than neutral: the extra threads contend with the
+# single event loop that is also doing UDP ingest and WebSocket fan-out.
+ENV OPENBLAS_NUM_THREADS=1 \
+    OMP_NUM_THREADS=1
 
 # Recordings live on a volume. At 80 Hz a node writes roughly a gigabyte a day, and losing a
 # session is far more expensive than the disk it takes.
