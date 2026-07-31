@@ -194,3 +194,61 @@ def test_placement_snr_is_bounded_on_empty_input():
         mask=valid_mask(64),
     )
     assert band_snr_db(empty, BREATHING_BAND) == -60.0
+
+
+# -- incomplete subcarriers ------------------------------------------------------------------
+
+
+def holed_window(seed=0):
+    """A window where one bright subcarrier is missing two seconds in the middle."""
+    window = synthetic_window(seed=seed)
+    holed = int(np.flatnonzero(window.mask)[10])
+    window.amp[:, holed] = 60.0  # comfortably past the magnitude gate
+    window.amp[100:140, holed] = np.nan
+    return window, holed
+
+
+def test_gate_rejects_a_subcarrier_with_a_hole_in_it():
+    """The gate used to screen on `isfinite(nanmean(column))`, and `nanmean` ignores exactly the
+    NaN being asked about — so a holed column had a finite mean and was admitted."""
+    window, holed = holed_window()
+    kept, rejected = magnitude_gate(window, 0.25)
+
+    assert holed in rejected
+    assert holed not in kept
+
+
+def test_a_holed_subcarrier_does_not_take_the_whole_analysis_down():
+    """`welch(detrend="linear")` runs each segment through `asarray_chkfinite` and raises rather
+    than returning NaN. There is no per-carrier guard above this, so admitting one unusable
+    column aborts the entire metrics pass — every analysis, for every node."""
+    window, holed = holed_window()
+
+    ranked = rank_for_band(window, SelectionConfig(top_k=8), band=BREATHING_BAND)
+    assert holed not in ranked.indices.tolist()
+    assert ranked.indices.size > 0, "the carriers that are fine must still be ranked"
+
+    snr = band_snr_db(window, BREATHING_BAND)
+    assert np.isfinite(snr)
+    assert snr == pytest.approx(band_snr_db(synthetic_window(), BREATHING_BAND), abs=1.0)
+
+
+def test_motion_ranking_skips_a_holed_subcarrier():
+    window, holed = holed_window()
+    ranked = rank_for_motion(window, np.full(64, 0.16), SelectionConfig(top_k=8))
+
+    assert holed not in ranked.indices.tolist()
+    assert np.isfinite(ranked.scores).all()
+
+
+def test_a_window_with_nothing_usable_selects_nothing():
+    """Returning every valid subcarrier as "kept" when none of them is usable hands the
+    unusable ones straight downstream, which is the failure this gate exists to prevent."""
+    window = synthetic_window()
+    window.amp[:] = np.nan
+
+    kept, rejected = magnitude_gate(window, 0.25)
+    assert kept.size == 0
+    assert rejected.size == int(window.mask.sum())
+    assert band_snr_db(window, BREATHING_BAND) == -60.0
+    assert rank_for_band(window, SelectionConfig(), band=BREATHING_BAND).indices.size == 0

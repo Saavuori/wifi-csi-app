@@ -63,18 +63,34 @@ def magnitude_gate(
 
     Low mean magnitude *is* the deep-fade signature. This is the one place mean amplitude
     belongs — as an exclusion filter, never as a ranking term.
+
+    A subcarrier also has to be *complete* over the window, and that condition cannot be folded
+    into the mean test: the screening was `isfinite(nanmean(column))`, and `nanmean` ignores
+    precisely the NaN it was being asked about. A column with a hole in it — a frame stored
+    under a different mask, an amplitude that arrived NaN for any other reason — therefore has a
+    perfectly finite mean and sails through, and every frequency-domain stage below refuses it:
+    `np.interp` smears the NaN across the resampled column, and `welch(detrend="linear")` runs
+    the segment through `asarray_chkfinite` and raises `ValueError` rather than returning NaN.
+
+    That raise is not contained anywhere. `compute_metrics` has no per-carrier guard, so it
+    takes down the whole metrics pass — presence, breathing, heart and the node health broadcast
+    for every node, not just this one — and keeps doing it for as long as the hole is inside the
+    analysis window. One unusable subcarrier is worth exactly one unusable subcarrier.
     """
     valid = np.flatnonzero(window.mask)
     if valid.size == 0 or len(window) == 0:
         return valid, np.array([], dtype=int)
 
-    means = np.nanmean(window.amp[:, valid], axis=0)
-    finite = np.isfinite(means)
-    if not finite.any():
-        return valid, np.array([], dtype=int)
+    block = window.amp[:, valid]
+    usable = np.isfinite(block).all(axis=0)
+    if not usable.any():
+        return np.array([], dtype=int), valid
 
-    threshold = np.quantile(means[finite], np.clip(quantile, 0.0, 0.95))
-    keep = finite & (means >= threshold)
+    means = np.full(valid.size, -np.inf, dtype=np.float64)
+    means[usable] = block[:, usable].mean(axis=0)
+
+    threshold = np.quantile(means[usable], np.clip(quantile, 0.0, 0.95))
+    keep = usable & (means >= threshold)
     return valid[keep], valid[~keep]
 
 
