@@ -10,9 +10,10 @@ apps, which is what this server runs.
 curl -fsSL https://raw.githubusercontent.com/Saavuori/wifi-csi-app/main/install.sh | bash
 ```
 
-Installs Docker if it is missing, raises `net.core.rmem_max`, pulls the arm64 image, starts the
-server, and — unless you pass `--no-demo` — starts a synthetic node so there is something to
-look at without hardware. `--uninstall` reverses all of it. `--help` lists the rest.
+Installs Docker if it is missing, raises `net.core.rmem_max`, pulls the arm64 image and starts the
+server. On a Pi whose radio nexmon_csi can patch it also makes this Pi a sensor, measuring against
+your access point; `--no-node` leaves the Wi-Fi firmware alone and gives you the server by itself.
+`--uninstall` reverses all of it. `--help` lists the rest.
 
 Requirements: **64-bit** Raspberry Pi OS on a Pi 4 or 5. On a 32-bit install the script stops
 and tells you why: numpy and scipy publish no armv7 wheels, so there is nothing for pip to
@@ -21,7 +22,7 @@ install and a source build of scipy on a Pi is an afternoon.
 Or with compose, from a clone:
 
 ```sh
-docker compose -f deploy/compose.yaml --profile demo up -d
+docker compose -f deploy/compose.yaml up -d
 ```
 
 Two host settings the container cannot do for itself:

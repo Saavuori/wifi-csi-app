@@ -199,15 +199,24 @@ install_deps() {
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
     # git/gcc/make build the toolchain; the rest are nexmon's own requirements. flex, bison
-    # and libfl-dev build its C parser; texinfo and libtool build the cross-binutils.
+    # and libfl-dev build its C parser; texinfo and libtool build the cross-binutils. xxd is
+    # its own package since Bullseye — it used to arrive with vim-common, so a clean Pi does
+    # not have it, and nexmon's firmware blob extraction fails with `xxd: command not found`
+    # partway into a build that has already run for several minutes.
     apt-get install -y -qq \
         git gcc make automake libtool texinfo flex bison libfl-dev \
-        gawk qpdf tcpdump iw python3 python3-numpy \
+        gawk qpdf tcpdump iw xxd python3 python3-numpy \
         raspberrypi-kernel-headers > /dev/null 2>&1 || \
     apt-get install -y -qq \
         git gcc make automake libtool texinfo flex bison libfl-dev \
-        gawk qpdf tcpdump iw python3 python3-numpy > /dev/null
+        gawk qpdf tcpdump iw xxd python3 python3-numpy > /dev/null
     ok "installed"
+
+    # An old release, where xxd still came from vim-common. Cheaper to say so now than to have
+    # the build stop on it ten minutes in.
+    command -v xxd > /dev/null 2>&1 || \
+        warn "xxd is still not on PATH and nexmon's blob extraction needs it.
+    Try: apt-get install vim-common"
 
     # nexmon's build scripts are Python 2. It is not in Debian's current archive, so this is
     # a known-awkward step rather than something the script got wrong.
