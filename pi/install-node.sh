@@ -218,17 +218,13 @@ install_deps() {
         warn "xxd is still not on PATH and nexmon's blob extraction needs it.
     Try: apt-get install vim-common"
 
-    # nexmon's build scripts are Python 2. It is not in Debian's current archive, so this is
-    # a known-awkward step rather than something the script got wrong.
-    if ! command -v python2.7 > /dev/null 2>&1; then
-        warn "python2.7 is not installed and nexmon's build scripts need it."
-        say "    On current Raspberry Pi OS:"
-        say "      wget https://www.python.org/ftp/python/2.7.18/Python-2.7.18.tgz"
-        say "      # or install it from the Debian archive, then run this again"
-        if ! ask "Continue anyway and let the build tell us?" n; then
-            exit 1
-        fi
-    fi
+    # There used to be a python2.7 check here. It was wrong: nothing on this build path
+    # invokes python at all. The root Makefile builds only buildtools and firmwares, neither
+    # of which calls it, setup_env.sh does not, and the CSI fork's Makefile, Makefile.rpi,
+    # makecsiparams and csi-connected.sh do not either. The only python in the nexmon tree is
+    # under utilities/ — aircrack-ng and gettext — which the root Makefile never descends into.
+    # The check cost more than it could ever have caught: it warned about a dependency that is
+    # not real and then asked a question defaulting to *abort*.
 }
 
 # Puts the nexmon_csi checkout in CSI_DIR. A global rather than an echoed path, so that the
@@ -296,8 +292,9 @@ build_firmware() {
     # setup_env.sh must be sourced from the nexmon root; it exports the paths every
     # downstream Makefile reads.
     ( cd "$NEXMON_DIR" && set +u && . ./setup_env.sh && make ) \
-        || die "the nexmon toolchain build failed. This is the fragile step: it is sensitive
-       to the kernel and to python2.7 being present. The log above says which.
+        || die "the nexmon toolchain build failed. This is the fragile step: it compiles a
+       cross-toolchain and every chip's firmware in the tree, so an unrelated chip can
+       stop yours. The last few lines above name the missing tool or the failing file.
        Nothing is broken — rerun after fixing and it resumes here."
 
     # Makefile.rpi is the path that does not need a patched brcmfmac, which is what makes
