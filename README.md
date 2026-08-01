@@ -293,7 +293,7 @@ Numbered as in the build plan.
 | Phase | Where | State |
 |---|---|---|
 | 1 — Firmware | `firmware/` | Implemented and **run on hardware**: 96–99 Hz, zero sequence gaps, 96–100% probe yield. The ring and wire layout also have host tests. See the measurements in `firmware/README.md` |
-| 1b — Raspberry Pi node | `pi/` | Implemented and tested against synthetic nexmon packets. **Not yet run on a Pi** — the translation is covered, the firmware build and the live capture are not |
+| 1b — Raspberry Pi node | `pi/` | Firmware builds, installs and loads on a Pi 4 (Debian 13, kernel 6.12); `wlan0` stays associated at 80 MHz. **Live capture is blocked** — `nexutil` cannot reach the firmware on this kernel, so the extractor is never configured and no frames are emitted. See [`pi/README.md`](pi/README.md#known-limitation-nexutil-cannot-reach-the-firmware) |
 | 2 — Ingest + recorder | `server/csi/{ingest,recorder,replay,sessions}.py` | Implemented and tested |
 | 3 — Waterfall | `web/src/views/waterfall.ts` | Implemented |
 | 4 — Motion + presence | `server/csi/dsp/{presence,selection}.py` | Implemented and tested |

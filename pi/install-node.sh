@@ -35,10 +35,15 @@ NEXMON_REPO="${CSI_NEXMON_BASE_REPO:-https://github.com/seemoo-lab/nexmon.git}"
 CSI_REPO="${CSI_NEXMON_REPO:-https://github.com/Saavuori/nexmon_csi.git}"
 CSI_BRANCH="${CSI_NEXMON_BRANCH:-claude/rpi-wifi-csi-capture-368a70}"
 
-# nexmon patches one firmware version per chip directory, and this is the pairing that the
-# Raspberry Pi's BCM43455 ships with.
+# nexmon patches one firmware version per chip directory, and the CSI patch decides which.
+# This must be 7_45_189: the fork's src/version.c declares `char version[]` only inside
+#     #if NEXMON_CHIP == CHIP_VER_BCM43455c0 && NEXMON_FW_VERSION == FW_VER_7_45_189
+# and every one of its firmware-version references is that same pairing. Against 7_45_206 —
+# which nexmon does ship a firmware directory for, so it looks plausible — no #if branch
+# matches, while the GenericPatch4(version_patch, version) below the #endif still refers to
+# the symbol. The build dies 20 minutes in with "error: 'version' undeclared here".
 CHIP="bcm43455c0"
-FW_VERSION="7_45_206"
+FW_VERSION="7_45_189"
 
 PREFIX="/opt/csi-node"
 NEXMON_DIR="$PREFIX/nexmon"
@@ -218,13 +223,114 @@ install_deps() {
         warn "xxd is still not on PATH and nexmon's blob extraction needs it.
     Try: apt-get install vim-common"
 
-    # There used to be a python2.7 check here. It was wrong: nothing on this build path
-    # invokes python at all. The root Makefile builds only buildtools and firmwares, neither
-    # of which calls it, setup_env.sh does not, and the CSI fork's Makefile, Makefile.rpi,
-    # makecsiparams and csi-connected.sh do not either. The only python in the nexmon tree is
-    # under utilities/ — aircrack-ng and gettext — which the root Makefile never descends into.
-    # The check cost more than it could ever have caught: it warned about a dependency that is
-    # not real and then asked a question defaulting to *abort*.
+    install_armhf_runtime
+}
+
+# nexmon's cross-compiler is a 32-bit ARM binary — gcc-arm-none-eabi-5_4-2016q2-linux-armv7l —
+# and setup_env.sh selects it on aarch64 too. 64-bit Raspberry Pi OS has none of what it needs
+# to run, and the first symptom is deeply misleading:
+#
+#     .../bin/arm-none-eabi-gcc: not found
+#
+# The file is right there. "not found" is the shell reporting a missing ELF *interpreter*,
+# /lib/ld-linux-armhf.so.3, which arrives with libc6:armhf.
+install_armhf_runtime() {
+    [ "$(uname -m)" = "aarch64" ] || return 0
+
+    step "Installing the 32-bit runtime for nexmon's toolchain"
+    dpkg --print-foreign-architectures 2>/dev/null | grep -qx armhf \
+        || dpkg --add-architecture armhf
+    apt-get update -qq
+    apt-get install -y -qq libc6:armhf libmpc3:armhf libgmp10:armhf \
+        libgmp-dev:armhf crossbuild-essential-armhf > /dev/null 2>&1 \
+        || warn "some armhf packages did not install; the toolchain may not run"
+    ok "armhf runtime installed"
+}
+
+# cc1 also links libisl.so.10 and libmpfr.so.4. Those are long gone from Debian — trixie ships
+# libisl23 and libmpfr6 — so they are built from the sources nexmon bundles for exactly this.
+# Skipped entirely once they exist, because this is several minutes of compiling.
+build_host_libs() {
+    [ "$(uname -m)" = "aarch64" ] || return 0
+    local prefix="$PREFIX/armhf-libs"
+    if [ -e "$prefix/lib/libisl.so.10" ] && [ -e "$prefix/lib/libmpfr.so.4" ]; then
+        ok "armhf libisl/libmpfr already built"
+        return 0
+    fi
+
+    step "Building libisl.so.10 and libmpfr.so.4 for the toolchain"
+    say "  ${dim}a few minutes; they are not packaged on any current Debian${reset}"
+    mkdir -p "$prefix"
+
+    # --build is explicit because these are 2012-vintage autotools whose config.guess predates
+    # aarch64 and bails with "cannot guess build type". The ACLOCAL=:/AUTOCONF=: overrides stop
+    # make trying to regenerate with aclocal-1.15, which no current Debian ships.
+    local host=arm-linux-gnueabihf build=aarch64-unknown-linux-gnu
+    local noregen="ACLOCAL=: AUTOCONF=: AUTOMAKE=: AUTOHEADER=: MAKEINFO=:"
+
+    ( cd "$NEXMON_DIR/buildtools/mpfr-3.1.4" \
+        && ./configure --build="$build" --host="$host" --prefix="$prefix" \
+             --with-gmp-include=/usr/include/arm-linux-gnueabihf \
+             --with-gmp-lib=/usr/lib/arm-linux-gnueabihf \
+             --disable-static --enable-shared > /dev/null 2>&1 \
+        && make -j"$(nproc)" $noregen > /dev/null 2>&1 \
+        && make install $noregen > /dev/null 2>&1 ) \
+        || die "could not build libmpfr.so.4 for the toolchain"
+
+    ( cd "$NEXMON_DIR/buildtools/isl-0.10" \
+        && ./configure --build="$build" --host="$host" --prefix="$prefix" \
+             --with-gmp-prefix=/usr --disable-static --enable-shared > /dev/null 2>&1 \
+        && make -j"$(nproc)" $noregen > /dev/null 2>&1 \
+        && make install $noregen > /dev/null 2>&1 ) \
+        || die "could not build libisl.so.10 for the toolchain"
+
+    printf '%s\n' "$prefix/lib" > /etc/ld.so.conf.d/csi-nexmon-armhf.conf
+    ldconfig
+    ok "built and registered with ldconfig"
+}
+
+# nexmon's b43 disassembly helpers are Python 2. They are invoked by *path* from Makefile.rpi,
+# so their shebang is the dependency and grepping the Makefiles for "python" does not reveal it
+# — which is how an earlier version of this script concluded python was not needed at all.
+#
+# Rather than requiring a python2 that Debian no longer ships, convert them. The constructs are
+# few and mechanical: print statements, `except X, e:` and the removed `file()` builtin. There
+# are no iteritems/has_key/xrange/long/unicode/backticks/octal literals, and every '/' in them
+# is in a comment, a regex or an #include path rather than arithmetic, so true-versus-floor
+# division cannot silently change a result.
+port_b43_tools_to_python3() {
+    local dir="$NEXMON_DIR/buildtools/b43-v3/debug"
+    local f converted=0
+    for f in "$dir/libb43.py" "$dir/b43-beautifier"; do
+        [ -f "$f" ] || continue
+        # Already converted by a previous run.
+        head -1 "$f" | grep -q 'python3' && continue
+        cp -n "$f" "$f.py2bak" 2>/dev/null || true
+        python3 - "$f" <<'PY' || die "could not port $f to Python 3"
+import re, sys, py_compile
+path = sys.argv[1]
+src = open(path, encoding='utf-8').read()
+out = []
+for line in src.splitlines():
+    if line.lstrip().startswith('#'):
+        out.append(line); continue
+    new = re.sub(r'^(\s*except\s+[\w.]+)\s*,\s*(\w+)\s*:', r'\1 as \2:', line)
+    new = re.sub(r'(?<![\w.])file\(', 'open(', new)
+    m = re.match(r'^(\s*)print\s+(?!\()(.+?)\s*$', new)
+    if m:
+        new = f'{m.group(1)}print({m.group(2)})'
+    out.append(new)
+text = re.sub(r'^#!.*python\s*$', '#!/usr/bin/env python3',
+              '\n'.join(out) + '\n', count=1, flags=re.M)
+open(path, 'w', encoding='utf-8').write(text)
+# Refuse to leave behind a file that only looks converted.
+py_compile.compile(path, doraise=True, cfile=path + '.pyc-check')
+PY
+        rm -f "$f.pyc-check"
+        converted=$((converted + 1))
+    done
+    [ "$converted" -gt 0 ] && ok "ported $converted b43 build tool(s) to Python 3"
+    return 0
 }
 
 # Puts the nexmon_csi checkout in CSI_DIR. A global rather than an echoed path, so that the
@@ -305,6 +411,9 @@ build_firmware() {
        tool or the failing file. Nothing is broken — rerun after fixing and it
        resumes here."
 
+    port_b43_tools_to_python3
+    clear_stale_ucode "$csi_dir"
+
     # Makefile.rpi is the path that does not need a patched brcmfmac, which is what makes
     # this work on current kernels and on the Pi 5 at all.
     ( cd "$csi_dir" && set +u && . "$NEXMON_DIR/setup_env.sh" \
@@ -312,7 +421,87 @@ build_firmware() {
         && make -f Makefile.rpi install-csi-tools ) \
         || die "the CSI firmware build failed; see the log above"
 
+    install_nexutil
     ok "firmware patched and installed"
+}
+
+# The ucode rule is two commands: b43-dasm writes gen/ucode.asm, then b43-beautifier rewrites
+# it through a temporary file. If the beautifier fails, the raw disassembly is already on disk
+# and *newer than its prerequisite*, so every later run skips the rule entirely and quietly
+# assembles unbeautified code. That surfaces far away, as
+#
+#     Parser ERROR ... jext COND_RX_IFS2, skip+  /  syntax error
+#
+# because the beautifier is also what prepends the #include lines defining COND_RX_IFS2.
+# Detect the half-built file by its missing preamble and remove it and everything derived.
+clear_stale_ucode() {
+    local dir="$1" asm="$1/gen/ucode.asm"
+    [ -f "$asm" ] || return 0
+    head -1 "$asm" | grep -q '#include' && return 0
+    warn "gen/ucode.asm was left unbeautified by an earlier failed run; regenerating"
+    rm -f "$asm" "$dir/gen/ucode.bin" "$dir/gen/ucode_compressed.bin" \
+          "$dir/src/csi.ucode.$CHIP.$FW_VERSION.asm"
+}
+
+# install-csi-tools builds makecsiparams and nothing else, but csi-connected.sh needs nexutil
+# too and refuses to run without it. nexutil lives in the base nexmon tree, under utilities/,
+# which no target in the root Makefile descends into — so nothing builds it and the service
+# fails at ExecStartPre with "'nexutil' not found in PATH".
+#
+# Built without -DUSE_NETLINK, which the upstream Makefile hardcodes. Netlink needs nexmon's
+# patched brcmfmac module; this install deliberately keeps the stock driver, so the netlink
+# build cannot reach the firmware. It fails in a particularly unhelpful way — the socket error
+# goes to stderr but the exit status is still 0, so csi-connected.sh's own error checking
+# passes and it reports "CSI collection enabled" having configured nothing.
+install_nexutil() {
+    step "Building nexutil"
+    ( cd "$NEXMON_DIR" && set +u && . ./setup_env.sh && make -C utilities/libnexio ) \
+        > /dev/null 2>&1 || true
+    ( cd "$NEXMON_DIR/utilities/nexutil" && set +u && . "$NEXMON_DIR/setup_env.sh" \
+        && gcc -static -o nexutil nexutil.c bcmutils.c bcmwifi_channels.c \
+             b64-encode.c b64-decode.c \
+             -DBUILD_ON_RPI -DVERSION=\"csi-node\" \
+             -I. -I./include -I../../patches/include -I../libnexio -L../libnexio/ \
+             -lnexio -I../libargp \
+        && install -m 0755 nexutil /usr/bin/nexutil ) \
+        || die "could not build nexutil; csi-connected.sh cannot configure the extractor
+       without it. See utilities/nexutil in the nexmon tree."
+    ok "nexutil installed to /usr/bin"
+}
+
+# ---------------------------------------------------------------------------------------
+# Undoing the firmware
+# ---------------------------------------------------------------------------------------
+
+# The old undo here was `update-alternatives --auto brcmfmac43455-sdio.bin`, which could not
+# work, in two separate ways. The patch registers the link group as *cyfmac43455-sdio.bin*
+# (see install-firmware in Makefile.rpi), so that name matched nothing. And --auto selects the
+# highest-priority alternative, which is nexmon's own at priority 30 and the only one
+# registered — so even with the right name it would reinstall the patched firmware rather than
+# remove it. Removing the alternative is what restores the packaged file.
+#
+# This is the command you need when the radio is dead and you are typing on a directly
+# attached keyboard, so it must be correct.
+FIRMWARE_ALT="cyfmac43455-sdio.bin"
+FIRMWARE_PATCHED="/lib/firmware/nexmon/brcmfmac43455-sdio.bin"
+
+RESTORE_FIRMWARE_SH=$(cat <<EOF
+update-alternatives --remove $FIRMWARE_ALT $FIRMWARE_PATCHED >/dev/null 2>&1 || true
+apt-get install --reinstall -y firmware-brcm80211 >/dev/null 2>&1 || \\
+    echo "warning: could not reinstall firmware-brcm80211; do it by hand before rebooting"
+EOF
+)
+
+restore_stock_firmware() {
+    command -v update-alternatives > /dev/null 2>&1 || return 0
+    step "Restoring the stock Wi-Fi firmware"
+    update-alternatives --remove "$FIRMWARE_ALT" "$FIRMWARE_PATCHED" > /dev/null 2>&1 || true
+    # --remove takes the symlink with it, so the packaged file has to come back from the
+    # package rather than from anything left on disk.
+    DEBIAN_FRONTEND=noninteractive apt-get install --reinstall -y firmware-brcm80211 \
+        > /dev/null 2>&1 \
+        || warn "could not reinstall firmware-brcm80211; run that by hand before rebooting"
+    ok "stock firmware restored"
 }
 
 # ---------------------------------------------------------------------------------------
@@ -427,7 +616,7 @@ systemctl disable --now csi-node >/dev/null 2>&1 || true
 [ -x "$PREFIX/bin/capture-down.sh" ] && "$PREFIX/bin/capture-down.sh" >/dev/null 2>&1 || true
 rm -f "$SERVICE" "$ENV_FILE"
 systemctl daemon-reload
-update-alternatives --auto brcmfmac43455-sdio.bin >/dev/null 2>&1 || true
+$RESTORE_FIRMWARE_SH
 echo "csi-node removed. Reboot to load the stock Wi-Fi firmware."
 echo "The nexmon build is still in $PREFIX; remove it with: rm -rf $PREFIX $STATE_DIR"
 EOF
@@ -460,25 +649,38 @@ uninstall() {
     systemctl daemon-reload
     ok "service removed"
 
-    # The patched firmware is installed through update-alternatives, so the stock firmware is
-    # still on disk and this puts it back rather than needing a reinstall.
-    if command -v update-alternatives > /dev/null 2>&1; then
-        update-alternatives --auto brcmfmac43455-sdio.bin > /dev/null 2>&1 || true
-    fi
+    restore_stock_firmware
     say ""
     say "The nexmon build in $PREFIX was left alone; remove it with:"
     say "  sudo rm -rf $PREFIX $STATE_DIR"
-    say "If Wi-Fi misbehaves, reboot to load the stock firmware."
+    say "${bold}Reboot to load the stock firmware.${reset}"
 }
 
 summary() {
     say ""
+    # This used to announce "The node is up." unconditionally, directly under start_service's
+    # own warning that it had not stayed up. Saying it worked when it did not is worse than
+    # saying nothing: it sends you to the app to look for frames that are never coming.
+    if ! systemctl is-active --quiet csi-node 2>/dev/null; then
+        warn "${bold}The node is installed but not running.${reset}"
+        say "    journalctl -u csi-node -n 40 --no-pager     ${dim}(why it stopped)${reset}"
+        say ""
+        say "    The firmware is patched either way. If the radio itself is misbehaving:"
+        say "      sudo $PREFIX/uninstall.sh && sudo reboot"
+        say ""
+        say "${dim}Config: $ENV_FILE${reset}"
+        return 1
+    fi
+
     say "${bold}The node is up.${reset}"
     say "  systemctl status csi-node"
     say "  journalctl -u csi-node -f     ${dim}(rate, subcarriers, RSSI every 10 s)${reset}"
     say ""
     say "It reports as node ${bold}$NODE_ID${reset} to ${SERVER}:${PORT}. Open the app and look at"
     say "Node health: a steady rate and sub-1% loss means the capture chain works."
+    say ""
+    say "${dim}Verify frames are actually being emitted, not just that the service runs:${reset}"
+    say "  sudo tcpdump -i $IFACE dst port 5500 -c 5"
     say ""
     say "${dim}Config: $ENV_FILE${reset}"
 }
@@ -501,6 +703,7 @@ main() {
         else
             install_deps
             fetch_sources
+            build_host_libs
             build_firmware
             stage_done "built"
         fi
