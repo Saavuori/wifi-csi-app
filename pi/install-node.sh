@@ -33,7 +33,11 @@ set -euo pipefail
 # mirror needs no edit to this file.
 NEXMON_REPO="${CSI_NEXMON_BASE_REPO:-https://github.com/seemoo-lab/nexmon.git}"
 CSI_REPO="${CSI_NEXMON_REPO:-https://github.com/Saavuori/nexmon_csi.git}"
-CSI_BRANCH="${CSI_NEXMON_BRANCH:-claude/rpi-wifi-csi-capture-368a70}"
+# master, not the original feature branch. That branch is 0 commits ahead of master and 3
+# behind, so it is a strict subset — and one of the three it is missing is the fix that makes
+# nexutil able to reach the firmware at all on a current kernel. Pinning it is what made an
+# otherwise complete install produce no CSI.
+CSI_BRANCH="${CSI_NEXMON_BRANCH:-master}"
 
 # nexmon patches one firmware version per chip directory, and the CSI patch decides which.
 # This must be 7_45_189: the fork's src/version.c declares `char version[]` only inside
@@ -208,13 +212,18 @@ install_deps() {
     # its own package since Bullseye — it used to arrive with vim-common, so a clean Pi does
     # not have it, and nexmon's firmware blob extraction fails with `xxd: command not found`
     # partway into a build that has already run for several minutes.
+    # libnl-3-dev and libnl-genl-3-dev are for nexutil's vendor-command build; see
+    # install_nexutil, which cannot talk to the driver without it. libcap2-bin provides
+    # setcap. pkg-config is how nexutil's Makefile finds the netlink libraries.
     apt-get install -y -qq \
         git gcc make automake libtool texinfo flex bison libfl-dev \
         gawk qpdf tcpdump iw xxd python3 python3-numpy \
+        pkg-config libnl-3-dev libnl-genl-3-dev libcap2-bin \
         raspberrypi-kernel-headers > /dev/null 2>&1 || \
     apt-get install -y -qq \
         git gcc make automake libtool texinfo flex bison libfl-dev \
-        gawk qpdf tcpdump iw xxd python3 python3-numpy > /dev/null
+        gawk qpdf tcpdump iw xxd python3 python3-numpy \
+        pkg-config libnl-3-dev libnl-genl-3-dev libcap2-bin > /dev/null
     ok "installed"
 
     # An old release, where xxd still came from vim-common. Cheaper to say so now than to have
@@ -448,25 +457,60 @@ clear_stale_ucode() {
 # which no target in the root Makefile descends into — so nothing builds it and the service
 # fails at ExecStartPre with "'nexutil' not found in PATH".
 #
-# Built without -DUSE_NETLINK, which the upstream Makefile hardcodes. Netlink needs nexmon's
-# patched brcmfmac module; this install deliberately keeps the stock driver, so the netlink
-# build cannot reach the firmware. It fails in a particularly unhelpful way — the socket error
-# goes to stderr but the exit status is still 0, so csi-connected.sh's own error checking
-# passes and it reports "CSI collection enabled" having configured nothing.
+# Built with USE_VENDOR_CMD=1, which is the whole game on a stock brcmfmac. The Makefile
+# defaults it to 0 and there are three ways to build this, two of which silently do nothing:
+#
+#   default (ioctl)   __nex_driver_io: error ret=-1 errno=95   -- driver rejects the ioctl
+#   -DUSE_NETLINK     nex_init_netlink: socket error (93)      -- needs a patched brcmfmac,
+#                                                                 and *still exits 0*, so
+#                                                                 csi-connected.sh reports
+#                                                                 success having configured
+#                                                                 nothing
+#   USE_VENDOR_CMD=1  works
+#
+# Vendor commands travel over nl80211, which the stock driver does implement — which is what
+# makes the whole no-patched-brcmfmac approach viable. Upstream says so in nexmon_csi
+# discussion #395: "It is important that nexutil is compiled with USE_VENDOR_CMD=1 option
+# though, otherwise IOCTLs will be rejected by the driver."
 install_nexutil() {
-    step "Building nexutil"
-    ( cd "$NEXMON_DIR" && set +u && . ./setup_env.sh && make -C utilities/libnexio ) \
-        > /dev/null 2>&1 || true
-    ( cd "$NEXMON_DIR/utilities/nexutil" && set +u && . "$NEXMON_DIR/setup_env.sh" \
-        && gcc -static -o nexutil nexutil.c bcmutils.c bcmwifi_channels.c \
-             b64-encode.c b64-decode.c \
-             -DBUILD_ON_RPI -DVERSION=\"csi-node\" \
-             -I. -I./include -I../../patches/include -I../libnexio -L../libnexio/ \
-             -lnexio -I../libargp \
-        && install -m 0755 nexutil /usr/bin/nexutil ) \
-        || die "could not build nexutil; csi-connected.sh cannot configure the extractor
-       without it. See utilities/nexutil in the nexmon tree."
-    ok "nexutil installed to /usr/bin"
+    local csi_dir="$NEXMON_DIR/patches/$CHIP/$FW_VERSION/nexmon_csi"
+    step "Building nexutil (vendor-command build)"
+
+    # The fork carries an install-nexutil target that does this properly, including the clean.
+    # Prefer it, so this stays correct if the build changes there, and fall back for a
+    # checkout old enough not to have it.
+    if grep -q '^install-nexutil:' "$csi_dir/Makefile.rpi" 2>/dev/null; then
+        ( cd "$csi_dir" && set +u && . "$NEXMON_DIR/setup_env.sh" \
+            && make -f Makefile.rpi install-nexutil ) > /dev/null 2>&1 \
+            || die "make -f Makefile.rpi install-nexutil failed. It needs libnl-3-dev and
+       libnl-genl-3-dev."
+    else
+        # The clean is not optional: object files from an earlier build keep their old
+        # transport, so a vendor-command rebuild links the previous one and looks broken.
+        ( cd "$NEXMON_DIR" && set +u && . ./setup_env.sh \
+            && make -C utilities/libnexio clean > /dev/null 2>&1
+          cd "$NEXMON_DIR" && set +u && . ./setup_env.sh \
+            && make -C utilities/nexutil clean > /dev/null 2>&1
+          cd "$NEXMON_DIR" && set +u && . ./setup_env.sh \
+            && make -C utilities/nexutil install USE_VENDOR_CMD=1 ) > /dev/null 2>&1 \
+            || die "could not build nexutil with USE_VENDOR_CMD=1. It needs libnl-3-dev and
+       libnl-genl-3-dev; without a working nexutil, csi-connected.sh configures
+       nothing and no CSI is ever emitted."
+    fi
+
+    command -v nexutil > /dev/null 2>&1 \
+        || die "nexutil built but is not on PATH"
+    # So the extractor can be configured without full root later if wanted.
+    setcap cap_net_admin+ep "$(command -v nexutil)" 2>/dev/null || true
+
+    # Prove it can actually reach the firmware rather than trusting the build. This is the
+    # check whose absence let a non-functional nexutil look fine for an entire install.
+    if nexutil -I"$IFACE" -k 2>&1 | grep -q "^chanspec:"; then
+        ok "nexutil reaches the firmware"
+    else
+        warn "nexutil built but cannot read the chanspec from $IFACE. If $IFACE is not
+    associated that is expected; otherwise CSI will not be emitted."
+    fi
 }
 
 # ---------------------------------------------------------------------------------------

@@ -70,8 +70,23 @@ SEC_CHANNEL_BELOW = 2
 # Since seemoo-lab/nexmon_csi#256 the payload opens with two magic bytes rather than four.
 # Both bytes are 0x11, so this reads the same either endianness.
 NEXMON_MAGIC = 0x1111
-# magic u16 | src_mac 6 | seq u16 | core/spatial u16 | chanspec u16 | chip u16
-NEXMON_HEADER_SIZE = 16
+# magic u16 | rssi i8 | fctl u8 | src_mac 6 | seq u16 | core/spatial u16 | chanspec u16 |
+# chip u16  =  18 bytes.
+#
+# This was 16 for a long time, with src_mac read from offset 2, and it rejected every real
+# frame: a bcm43455c0 at 80 MHz emits 1042 bytes, so a 16-byte header leaves 1026, and
+# 1026 % 4 == 2 fails the "int16 pair per subcarrier" check in parse_nexmon. Nothing said so,
+# because the malformed-packet branch `continue`s past the status line that counts it.
+#
+# The rssi/fctl pair between the magic and the MAC is what was missing. Verified against a
+# live capture: with 18, src_mac reads back as the associated BSSID and chanspec matches what
+# `nexutil -k` reports for the same link, and (1042 - 18) / 4 = 256 subcarriers.
+NEXMON_HEADER_SIZE = 18
+_OFF_RSSI = 2
+_OFF_SRC_MAC = 4
+_OFF_SEQ = 10
+_OFF_CORE_SPATIAL = 12
+_OFF_CHANSPEC = 14
 
 ETH_P_IP = 0x0800
 IPPROTO_UDP = 17
@@ -81,6 +96,7 @@ NEXMON_UDP_PORT = 5500
 # developer machine — the tests run anywhere, the node itself only ever runs on a Pi.
 SO_TIMESTAMPNS = getattr(socket, "SO_TIMESTAMPNS", 35)
 SCM_TIMESTAMPNS = getattr(socket, "SCM_TIMESTAMPNS", 35)
+SO_BINDTODEVICE = getattr(socket, "SO_BINDTODEVICE", 25)
 
 # `struct timespec` as SCM_TIMESTAMPNS delivers it, keyed by the length of the control message:
 # two 64-bit words on a 64-bit userspace, two 32-bit words on a 32-bit one. See `timestamp_us`.
@@ -130,9 +146,9 @@ def parse_nexmon(payload: bytes) -> NexmonPacket | None:
         return None
     n_sub = body // 4
 
-    src_mac = payload[2:8]
-    core_spatial = struct.unpack_from("<H", payload, 10)[0]
-    chanspec = _plausible_chanspec(payload, 12)
+    src_mac = payload[_OFF_SRC_MAC:_OFF_SRC_MAC + 6]
+    core_spatial = struct.unpack_from("<H", payload, _OFF_CORE_SPATIAL)[0]
+    chanspec = _plausible_chanspec(payload, _OFF_CHANSPEC)
 
     raw = np.frombuffer(payload, dtype="<i2", count=2 * n_sub, offset=NEXMON_HEADER_SIZE)
     # nexmon interleaves (real, imag). The uplink wire is (imag, real) because that is the
@@ -427,9 +443,10 @@ class Prober(threading.Thread):
     generate the traffic, measure the reply.
     """
 
-    def __init__(self, target: str, hz: float) -> None:
+    def __init__(self, target: str, hz: float, iface: str | None = None) -> None:
         super().__init__(name="prober", daemon=True)
         self.target = target
+        self.iface = iface
         self.interval = 1.0 / hz if hz > 0 else 0.0
         self.sent = 0
         self.failures = 0
@@ -444,6 +461,19 @@ class Prober(threading.Thread):
         except PermissionError:
             log.error("probing needs root (raw ICMP); run with --probe-hz 0 to disable")
             return
+
+        # Pin the probes to the interface we are measuring. Without this the kernel picks by
+        # route, and on a Pi with Ethernet plugged in as well the gateway is reachable both
+        # ways -- so every probe leaves via eth0, puts nothing on the air, and the capture
+        # rate collapses to the beacon rate with no error anywhere to explain it. Wrong in a
+        # way that looks exactly like a dead radio.
+        if self.iface:
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, SO_BINDTODEVICE,
+                                self.iface.encode() + b"\0")
+            except OSError as e:
+                log.warning("could not bind probes to %s (%s); they will follow the routing "
+                            "table and may not traverse the radio", self.iface, e)
         sock.setblocking(False)
 
         ident = os.getpid() & 0xFFFF
@@ -577,8 +607,8 @@ def run(args: argparse.Namespace) -> int:
             log.warning("no default gateway found; not probing. Frames will arrive at the "
                         "beacon rate, which is enough for breathing but not for much else.")
         else:
-            log.info("probing %s at %g Hz", target, args.probe_hz)
-            prober = Prober(target, args.probe_hz)
+            log.info("probing %s at %g Hz via %s", target, args.probe_hz, args.iface)
+            prober = Prober(target, args.probe_hz, iface=args.iface)
             prober.start()
 
     log.info(
@@ -588,7 +618,12 @@ def run(args: argparse.Namespace) -> int:
 
     bad = 0
     unstamped = 0
+    n_sub = 0
     reported = time.monotonic()
+
+    def due_to_report(now: float) -> bool:
+        return args.status_interval > 0 and now - reported >= args.status_interval
+
     try:
         while True:
             packet, ancdata, _flags, _addr = capture.recvmsg(4096, socket.CMSG_SPACE(64))
@@ -599,7 +634,19 @@ def run(args: argparse.Namespace) -> int:
             pkt = parse_nexmon(payload)
             if pkt is None:
                 bad += 1
+                # Report from here too. The status line lives at the bottom of this loop, so
+                # for as long as *every* packet was malformed the process printed nothing at
+                # all -- no rate, and not even the malformed count that would have named the
+                # problem. A silent node is indistinguishable from a dead radio.
+                now = time.monotonic()
+                if due_to_report(now):
+                    log.warning(
+                        "%d malformed packets, none decoded (%d bytes, header expects %d). "
+                        "Is this nexmon_csi output?", bad, len(payload), NEXMON_HEADER_SIZE,
+                    )
+                    reported = now
                 continue
+            n_sub = pkt.n_sub
 
             now = time.monotonic()
             stats.refresh(now)
@@ -618,7 +665,7 @@ def run(args: argparse.Namespace) -> int:
             if datagram is not None:
                 out.sendto(datagram, server)
 
-            if args.status_interval > 0 and now - reported >= args.status_interval:
+            if due_to_report(now):
                 rate = node.frames / max(now - reported, 1e-9)
                 log.info(
                     "%d frames (%.1f Hz), %d subcarriers, rssi %d dBm, %d link changes, "
