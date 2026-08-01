@@ -1,9 +1,12 @@
-"""A synthetic CSI node.
+"""A synthetic CSI scene. TEST FIXTURE ONLY — never a data source for a running server.
 
-This exists so the entire pipeline — ingest, recording, replay, DSP, the waterfall — can be
-built and tested before any hardware arrives, and so the tests have a signal with a *known*
-answer. If the breathing estimator says 14.0 BPM on a scene generated at 14.0 BPM, that is
-worth more than any amount of staring at a real waterfall.
+Nothing in the product imports this. There is no command that starts it, no flag that enables
+it and no container that runs it; the only callers are under `tests/`. It is here because the
+tests need a signal with a *known* answer: if the breathing estimator says 14.0 BPM on a scene
+generated at 14.0 BPM, that is worth more than any amount of staring at a real waterfall.
+
+Keep it that way. A server showing fabricated frames that a user believes are measurements is
+worse than a server showing nothing, because it fails in the direction of looking correct.
 
 The channel model is small but physical rather than hand-drawn: a direct path plus a handful of
 static scatterers plus one moving reflector, each contributing a complex exponential whose
