@@ -289,13 +289,21 @@ build_firmware() {
     step "Building the patched firmware"
     say "  ${dim}20-40 minutes on a Pi. It compiles a cross-toolchain first.${reset}"
 
-    # setup_env.sh must be sourced from the nexmon root; it exports the paths every
-    # downstream Makefile reads.
-    ( cd "$NEXMON_DIR" && set +u && . ./setup_env.sh && make ) \
-        || die "the nexmon toolchain build failed. This is the fragile step: it compiles a
-       cross-toolchain and every chip's firmware in the tree, so an unrelated chip can
-       stop yours. The last few lines above name the missing tool or the failing file.
-       Nothing is broken — rerun after fixing and it resumes here."
+    # A plain `make` here builds the cross-toolchain and then descends into *every* chip in
+    # firmwares/, so a chip we will never load stops a build that had nothing to do with it.
+    # bcm43439a0 is the one that bites: its Makefile extracts a blob with `xxd -r -p > $@`,
+    # and because the redirect creates the target before xxd runs, a failure leaves an empty
+    # file behind that make then treats as built — so the next run fails differently, in the
+    # ucode extractor, with the original cause no longer on screen.
+    #
+    # buildtools is genuinely shared. The firmware directory is ours alone, so name it.
+    ( cd "$NEXMON_DIR" && set +u && . ./setup_env.sh \
+        && make -C buildtools \
+        && make -C "firmwares/$CHIP/$FW_VERSION" ) \
+        || die "the nexmon toolchain build failed. It compiles a cross-toolchain first, so
+       this is the long and fragile step. The last few lines above name the missing
+       tool or the failing file. Nothing is broken — rerun after fixing and it
+       resumes here."
 
     # Makefile.rpi is the path that does not need a patched brcmfmac, which is what makes
     # this work on current kernels and on the Pi 5 at all.
