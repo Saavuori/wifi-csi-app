@@ -16,14 +16,15 @@ A Pi Zero, Zero 2 W or original 3B carries a different chip and cannot do this a
 
 ## Installing
 
-The top-level `install.sh` offers this automatically on supported hardware:
+The top-level `install.sh` installs this alongside the server, with no flag needed — on hardware
+nexmon_csi can patch, it is what the one-line install does:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Saavuori/wifi-csi-app/main/install.sh | bash
 ```
 
-Answer yes when it asks about setting the Pi up as a sensor, or pass `--node` to skip the
-prompt. To install only the node, pointing at a server elsewhere:
+`--no-node` opts out and leaves the Wi-Fi firmware alone. To install only the node, pointing at a
+server elsewhere:
 
 ```bash
 sudo pi/install-node.sh --server 192.168.1.10

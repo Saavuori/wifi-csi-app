@@ -1,7 +1,7 @@
 # docker compose -f deploy/compose.yaml up -d
 #
-# Add `--profile demo` to also start a synthetic node, which makes the whole stack show real
-# motion and a real breathing rate with no hardware attached.
+# The server alone. Nodes report to it over UDP 5566 — a Pi running csi-node.service, or ESP32
+# boards pointed at this host.
 
 name: csi
 
@@ -31,22 +31,6 @@ services:
 
     volumes:
       - csi-data:/data
-
-  # A synthetic ESP32 speaking the real wire format over a real socket. The server cannot tell
-  # it apart from hardware. 14 breaths/min, alternating empty and occupied rooms.
-  synth:
-    image: ${CSI_IMAGE:-ghcr.io/saavuori/wifi-csi-app:latest}
-    container_name: csi-synth
-    profiles: ["demo"]
-    restart: unless-stopped
-    depends_on:
-      - csi
-    command:
-      - csi-synth
-      - --host=csi
-      - --nodes=2
-      - --breathing=14
-      - --scenario=cycle
 
 volumes:
   csi-data:

@@ -80,17 +80,16 @@ ESP32 involved. 64-bit Raspberry Pi OS:
 curl -fsSL https://raw.githubusercontent.com/Saavuori/wifi-csi-app/main/install.sh | bash
 ```
 
-That does both halves:
+One command, no flags, no questions about what you want: it builds a Pi that measures your actual
+room. Both halves:
 
+- **The capture, on the host.** Patches the BCM43455 with nexmon_csi and runs `csi-node.service`,
+  measuring against the access point this Pi is already associated with and forwarding to the
+  server on `127.0.0.1`. It reports as **node 20**.
 - **The server, in Docker.** Installs Docker if it is missing, raises `net.core.rmem_max`, pulls
   the arm64 image and starts it: UDP ingest, recorder, replayer, the DSP, and the web app —
-  waterfall, subcarriers, motion, breathing, heart rate, placement, sessions and node health.
-  Unless you pass `--no-demo` it also starts a synthetic node container, so the waterfall moves
-  and the breathing view converges on a known answer before any radio is involved. Open
+  waterfall, subcarriers, motion, breathing, heart rate, placement, sessions and node health. Open
   `http://<pi>:8080`.
-- **The capture, on the host.** On a radio nexmon_csi can patch it offers to make this same Pi a
-  real sensor: 256 subcarriers at 80 MHz against your access point, forwarding to the server on
-  `127.0.0.1`. Say yes, or pass `--node` to skip the prompt.
 
 `--uninstall` reverses all of it. `--help` lists the rest. Details and the compose file are in
 [`deploy/README.md`](deploy/README.md); what the Pi node does and does not measure is in
@@ -116,25 +115,32 @@ both worth knowing if you deploy by hand:
 - **Where `/data` lives.** A node at 80 Hz writes about 1 GB a day. On an SD card that is a wear
   problem as much as a capacity one — use a USB SSD, or run with `CSI_RECORD=false`.
 
-## Quick start, without hardware
+### How many subcarriers you get
 
-The whole stack runs against a synthetic node whose channel model is physical enough that the
-answers are known — a specific breathing rate, a specific motion schedule. That is how the DSP
-was developed and how it is tested.
+The count follows the channel width the access point uses — 256 at 80 MHz, 128 at 40, 64 at 20. A
+Pi associated to a 2.4 GHz network gives 64. If you want the full 256, put `wlan0` on a 5 GHz
+network running an 80 MHz channel and check what you actually got:
+
+```sh
+iw dev wlan0 link
+```
+
+## Running the server somewhere other than a Pi
+
+The server is ordinary Python and runs anywhere — the Pi install is that same server, packaged.
+This is the path for front-end and analysis work, or for collecting from ESP32 nodes onto a
+laptop:
 
 ```sh
 python -m venv .venv && .venv/bin/pip install -e "server[dev]"
 cd web && npm install && npm run build && cd ..
 
-# terminal 1
 CSI_WEB_DIR=web/dist .venv/bin/python -m csi
-
-# terminal 2 — two nodes, 14 breaths/min, alternating empty and occupied
-.venv/bin/python -m csi.tools.synth_node --nodes 2 --breathing 14 --scenario cycle
 ```
 
-Open <http://localhost:8080>. Within about a minute the presence detector finishes calibrating
-and starts tracking the scenario, and the breathing view settles near 14.
+Open <http://localhost:8080>, then point a node at this machine on port 5566 — an ESP32 from its
+setup page, or a Pi node installed with `--server <your-ip>`. The Node health view shows it
+arriving.
 
 For front-end work, `cd web && npm run dev` proxies `/api` and `/ws` to the Python server on
 8080 and gives you hot reload.

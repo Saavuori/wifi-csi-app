@@ -4,17 +4,15 @@
 #
 #     curl -fsSL https://raw.githubusercontent.com/Saavuori/wifi-csi-app/main/install.sh | bash
 #
-# By default this also starts a synthetic node, so the whole stack — waterfall, presence,
-# breathing — does something visible on a Pi with no ESP32 boards attached. Pass --no-demo
-# when you have real hardware to point at it.
+# This sets up a working sensor, measuring your actual room. Two halves: the server in Docker,
+# and — on a Pi whose radio nexmon_csi can patch (3B+, 4, 5, CM4) — this same Pi as a real CSI
+# node against your access point. See pi/README.md. The firmware build takes 20-40 minutes and,
+# on a Pi 5, one reboot; rerunning the same command resumes where it left off.
 #
-# On a Pi whose radio nexmon_csi can patch (3B+, 4, 5, CM4) it offers to make this same Pi a
-# real CSI sensor as well as the server — see pi/README.md. That part takes a while and, on a
-# Pi 5, one reboot, so it asks first unless you pass --node or --no-node.
+# On hardware nexmon cannot patch, the node step is skipped and you get the server alone, ready
+# for ESP32 nodes to report to.
 #
-#     --no-demo          do not start the synthetic node
-#     --node             also set this Pi up as a CSI sensor (nexmon_csi), no prompt
-#     --no-node          do not offer to, even on supported hardware
+#     --no-node          server only; do not touch the Wi-Fi firmware
 #     --node-id N        node id for this Pi, 1..254 (default 20)
 #     --data-dir PATH    where recordings go (default ~/csi-data)
 #     --http-port N      port for the web app (default 8080)
@@ -29,20 +27,23 @@ set -euo pipefail
 IMAGE="${CSI_IMAGE:-ghcr.io/saavuori/wifi-csi-app:latest}"
 REPO_URL="https://github.com/Saavuori/wifi-csi-app.git"
 CONTAINER="csi"
-SYNTH_CONTAINER="csi-synth"
+# Only ever removed, never started. Earlier versions of this script ran a synthetic node here,
+# so a re-run or an uninstall has to clean one up rather than leave it feeding fabricated
+# frames into a server the user believes is measuring their room.
+LEGACY_SYNTH_CONTAINER="csi-synth"
 NETWORK="csi-net"
 
 HTTP_PORT="${CSI_HTTP_PORT:-8080}"
 UDP_PORT="${CSI_UDP_PORT:-5566}"
 DATA_DIR="${CSI_DATA_DIR:-$HOME/csi-data}"
 
-DEMO=1
 BUILD=0
 UNINSTALL=0
 ASSUME_YES=0
 DOCKER="docker"
-# auto: offer it if the radio supports it. --node and --no-node decide it outright.
-NODE="auto"
+# On by default: a Pi that can sense, senses. Hardware nexmon cannot patch skips it on its own,
+# and --no-node is there for a capable Pi that is deliberately only the server.
+NODE=1
 NODE_ID="${CSI_NODE_ID:-20}"
 SRC_DIR=""
 
@@ -65,9 +66,7 @@ usage() {
     cat <<'EOF'
 Set up WiFi CSI sensing on a Raspberry Pi.
 
-  --no-demo          do not start the synthetic node
-  --node             also set this Pi up as a CSI sensor (nexmon_csi), no prompt
-  --no-node          do not offer to, even on supported hardware
+  --no-node          server only; do not touch the Wi-Fi firmware
   --node-id N        node id for this Pi, 1..254 (default 20)
   --data-dir PATH    where recordings go (default ~/csi-data)
   --http-port N      port for the web app (default 8080)
@@ -97,8 +96,6 @@ ask() {
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --no-demo)   DEMO=0 ;;
-        --demo)      DEMO=1 ;;
         --node)      NODE=1 ;;
         --no-node)   NODE=0 ;;
         --node-id)   NODE_ID="${2:?--node-id needs a number}"; shift ;;
@@ -200,7 +197,7 @@ check_storage() {
         /dev/mmcblk*)
             warn "$DATA_DIR is on the SD card. Recording writes ~1 GB per day per node, which
     fills a card and wears it out. For anything longer than a test, put it on a
-    USB SSD: $0 --data-dir /mnt/ssd/csi"
+    USB SSD: rerun with --data-dir /mnt/ssd/csi"
             ;;
     esac
 }
@@ -271,13 +268,12 @@ start_server() {
 
     $DOCKER network create "$NETWORK" > /dev/null 2>&1 || true
     remove_container "$CONTAINER"
+    # Upgrading from a version that ran one. Left in place it would keep feeding fabricated
+    # frames in alongside the real node's, which is worse than no data at all.
+    remove_container "$LEGACY_SYNTH_CONTAINER"
 
-    # With the synthetic node there is nothing to lose by not recording, and a test run has no
-    # business filling up an SD card. With real hardware the app's own default applies:
-    # recording is on, because losing a session you cannot repeat costs more than the disk.
-    local record="true"
-    if [ "$DEMO" = 1 ]; then record="false"; fi
-
+    # Recording on: everything that reaches this server is measured, and losing a session you
+    # cannot repeat costs more than the disk does.
     $DOCKER run -d \
         --name "$CONTAINER" \
         --network "$NETWORK" \
@@ -285,21 +281,9 @@ start_server() {
         -p "${HTTP_PORT}:8080" \
         -p "${UDP_PORT}:5566/udp" \
         -v "$DATA_DIR:/data" \
-        -e "CSI_RECORD=$record" \
+        -e "CSI_RECORD=true" \
         "$IMAGE" > /dev/null
-    ok "container $CONTAINER is up (recording: $record)"
-}
-
-start_synth() {
-    step "Starting a synthetic node"
-    remove_container "$SYNTH_CONTAINER"
-    $DOCKER run -d \
-        --name "$SYNTH_CONTAINER" \
-        --network "$NETWORK" \
-        --restart unless-stopped \
-        "$IMAGE" \
-        csi-synth --host "$CONTAINER" --nodes 2 --breathing 14 --scenario cycle > /dev/null
-    ok "two synthetic nodes, 14 breaths/min, alternating empty and occupied"
+    ok "container $CONTAINER is up (recording)"
 }
 
 # ---------------------------------------------------------------------------------------
@@ -318,29 +302,20 @@ csi_capable_radio() {
     esac
 }
 
-maybe_install_node() {
+install_node() {
     [ "$NODE" = 0 ] && return 0
 
     if ! csi_capable_radio; then
-        if [ "$NODE" = 1 ]; then
-            warn "this board's Wi-Fi chip is not one nexmon_csi supports; skipping --node"
-        fi
+        warn "this board's Wi-Fi chip is not one nexmon_csi supports, so this Pi cannot sense
+    for itself. The server is up and ready for ESP32 nodes to report to."
         return 0
     fi
 
-    if [ "$NODE" = auto ]; then
-        say ""
-        step "This Pi can be a sensor as well as the server"
-        say "  Its radio is one nexmon_csi can patch, so it can measure CSI itself with no"
-        say "  ESP32 boards involved: 256 subcarriers at 80 MHz against your access point."
-        say ""
-        say "  ${dim}It patches the Wi-Fi firmware, takes 20-40 minutes to build, and on a"
-        say "  Pi 5 needs one reboot part way through. Reversible with --uninstall.${reset}"
-        if ! ask "Set this Pi up as a CSI sensor too?" n; then
-            say "  ${dim}Skipped. Run install.sh --node later to change your mind.${reset}"
-            return 0
-        fi
-    fi
+    say ""
+    step "Making this Pi a sensor"
+    say "  Patching the Wi-Fi firmware with nexmon_csi: CSI against your access point with no"
+    say "  ESP32 boards involved. ${dim}20-40 minutes to build, one reboot on a Pi 5.${reset}"
+    say "  ${dim}Reversible with --uninstall. Pass --no-node for the server alone.${reset}"
 
     ensure_source
     [ -f "$SRC_DIR/pi/install-node.sh" ] \
@@ -375,7 +350,7 @@ wait_healthy() {
 
 uninstall() {
     step "Removing"
-    remove_container "$SYNTH_CONTAINER"
+    remove_container "$LEGACY_SYNTH_CONTAINER"
     remove_container "$CONTAINER"
     $DOCKER network rm "$NETWORK" > /dev/null 2>&1 || true
     ok "containers and network removed"
@@ -410,21 +385,12 @@ summary() {
         say "  journalctl -u csi-node -f     ${dim}(rate, subcarriers, RSSI every 10 s)${reset}"
         say ""
     fi
-    if [ "$DEMO" = 1 ]; then
-        say "The data is synthetic. Give the presence detector about a minute to finish"
-        say "calibrating, then it tracks the scenario and the breathing view settles near 14."
-        say ""
-        say "${bold}When your boards arrive:${reset}"
-        say "  $DOCKER rm -f $SYNTH_CONTAINER"
-        say "  # then point CSI_SERVER_HOST at ${ip:-this host} — see firmware/README.md"
-    else
-        say "Point your nodes at ${ip:-this host}:${UDP_PORT} and watch the Node health view."
-    fi
+    say "Point any further nodes at ${ip:-this host}:${UDP_PORT} and watch the Node health view."
     say ""
     say "${bold}Useful:${reset}"
     say "  $DOCKER logs -f $CONTAINER"
     say "  curl -s localhost:${HTTP_PORT}/api/status"
-    say "  $DOCKER rm -f $CONTAINER $SYNTH_CONTAINER   ${dim}(remove everything)${reset}"
+    say "  $DOCKER rm -f $CONTAINER   ${dim}(remove everything)${reset}"
     say ""
     warn "the web app has no authentication, and the UDP port accepts frames from anyone who"
     say "    can reach it. That is fine on a home LAN and not fine on the open internet."
@@ -445,10 +411,9 @@ main() {
     ensure_sysctl
     ensure_image
     start_server
-    if [ "$DEMO" = 1 ]; then start_synth; fi
     wait_healthy || true
     # After the server, so that the node has somewhere to send its first frame.
-    maybe_install_node
+    install_node
     summary
 }
 
