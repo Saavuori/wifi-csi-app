@@ -4,6 +4,8 @@
 *.sh        text eol=lf
 # csi_node.py is copied onto a Pi and marked executable, so its shebang has the same problem.
 pi/*.py     text eol=lf
+# A NetworkManager dispatcher script, so it carries no extension and *.sh does not cover it.
+pi/90-csi-node text eol=lf
 Containerfile text eol=lf
 *.yml       text eol=lf
 *.yaml      text eol=lf
