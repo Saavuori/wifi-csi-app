@@ -18,11 +18,14 @@ from csi import protocol
 from csi.nodes import NodeHealth
 from csi.protocol import parse_frame
 from csi_node import (
+    NARROWBAND_BLOCK,
     NEXMON_HEADER_SIZE,
     Node,
+    RateGate,
     chanspec_channel,
     chanspec_sec_channel,
     encode_uplink,
+    occupied_span,
     parse_nexmon,
     quantize,
     read_wireless,
@@ -131,6 +134,225 @@ def test_sec_channel_is_none_at_20mhz_and_set_above_it():
     assert chanspec_sec_channel(0x1006) == csi_node.SEC_CHANNEL_NONE
     assert chanspec_sec_channel(0x1806) == csi_node.SEC_CHANNEL_ABOVE
     assert chanspec_sec_channel(0x1906) == csi_node.SEC_CHANNEL_BELOW
+
+
+# -- narrowband frames -------------------------------------------------------------------
+
+# 5 GHz channel 36, 80 MHz: the chanspec the Ethernet stimulus is a fallback for.
+CHANSPEC_CH36_80 = 0xE12A
+
+
+def narrowband_csi(block: int = 1, n_sub: int = 256, noise: float = 10.0) -> np.ndarray:
+    """A 20 MHz frame as an 80 MHz capture sees it: one block of signal, the rest noise.
+
+    This is what every beacon looks like on a wide chanspec, and what the access point's
+    transmission of the Ethernet stimulus looks like — multicast goes out at the basic rate.
+    """
+    rng = np.random.default_rng(seed=block)
+    csi = noise * (rng.normal(size=n_sub) + 1j * rng.normal(size=n_sub))
+    lo = block * NARROWBAND_BLOCK
+    csi[lo : lo + NARROWBAND_BLOCK] = sample_csi(NARROWBAND_BLOCK)
+    return csi
+
+
+@pytest.mark.parametrize("block", [0, 1, 2, 3])
+def test_a_narrowband_frame_is_located(block):
+    span = occupied_span(narrowband_csi(block))
+    assert span == slice(block * NARROWBAND_BLOCK, (block + 1) * NARROWBAND_BLOCK)
+
+
+@pytest.mark.parametrize("n_sub", [128, 256])
+def test_a_full_width_frame_is_left_whole(n_sub):
+    """The damaging false positive: truncating a real measurement to a quarter of itself."""
+    assert occupied_span(sample_csi(n_sub)) is None
+
+
+def test_a_20mhz_capture_has_nothing_to_compare_against():
+    assert occupied_span(sample_csi(64)) is None
+
+
+def test_a_frame_just_inside_the_margin_is_still_full_width():
+    """A deeply frequency-selective channel is not a narrowband frame."""
+    csi = sample_csi(256)
+    csi[:192] *= 10.0 ** (-11.0 / 20.0)  # 11 dB down, one dB inside the 12 dB threshold
+    assert occupied_span(csi) is None
+
+
+def test_the_node_forwards_one_class_at_a_time():
+    """Both classes reach the radio at once — beacons are narrow, real traffic is wide. Emitting
+    both would flip n_sub frame by frame, and every flip costs the server its history."""
+    node = Node(node_id=20)
+    narrow = nexmon_packet(narrowband_csi(), chanspec=CHANSPEC_CH36_80)
+    wide = nexmon_packet(sample_csi(256), chanspec=CHANSPEC_CH36_80)
+
+    assert node.on_packet(parse_nexmon(narrow), 0) is None
+    assert node.on_packet(parse_nexmon(wide), 10_000) is not None
+    assert node.dropped_class == 1
+
+    node.narrowband = True
+    assert node.on_packet(parse_nexmon(wide), 20_000) is None
+    assert node.on_packet(parse_nexmon(narrow), 30_000) is not None
+    assert node.dropped_class == 2
+
+
+def test_a_narrowband_frame_is_trimmed_to_the_block_it_occupies():
+    node = Node(node_id=20)
+    node.narrowband = True
+    frame = parse_frame(
+        node.on_packet(parse_nexmon(nexmon_packet(narrowband_csi(), chanspec=CHANSPEC_CH36_80)), 0)
+    )
+    assert frame.n_sub == NARROWBAND_BLOCK
+    # A 20 MHz measurement, whatever the chip is tuned to.
+    assert frame.sec_channel == csi_node.SEC_CHANNEL_NONE
+
+
+def test_the_trimmed_frame_carries_the_signal_and_not_the_noise():
+    """The point of trimming: 192 of the 256 bins were noise, and normalizing across them would
+    have quietly ruined every frame the stimulus produced."""
+    node = Node(node_id=20)
+    node.narrowband = True
+    csi = narrowband_csi(block=2)
+    frame = parse_frame(
+        node.on_packet(parse_nexmon(nexmon_packet(csi, chanspec=CHANSPEC_CH36_80)), 0)
+    )
+
+    kept = frame.amplitude()
+    expected = np.abs(csi[2 * NARROWBAND_BLOCK : 3 * NARROWBAND_BLOCK])
+    # Quantization discards absolute gain, so compare the shape rather than the values.
+    np.testing.assert_allclose(
+        kept / kept.max(), expected / expected.max(), atol=0.02
+    )
+
+
+def test_changing_class_bumps_the_epoch():
+    """A width change is a change of instrument, in the same way a roam is a change of room."""
+    node = Node(node_id=20)
+    wide = parse_frame(
+        node.on_packet(parse_nexmon(nexmon_packet(sample_csi(256), chanspec=CHANSPEC_CH36_80)), 0)
+    )
+    node.narrowband = True
+    narrow = parse_frame(
+        node.on_packet(
+            parse_nexmon(nexmon_packet(narrowband_csi(), chanspec=CHANSPEC_CH36_80)), 10_000
+        )
+    )
+
+    assert (wide.n_sub, wide.link_epoch) == (256, 0)
+    assert (narrow.n_sub, narrow.link_epoch) == (64, 1)
+    assert node.link_changes == 1
+
+
+def test_a_20mhz_link_has_no_classes_to_lock():
+    """Nothing at 20 MHz can be told apart from anything else, so neither mode may drop a frame
+    and the switch must not throw the baseline away. Locking here would leave `--stimulus
+    always` on a 20 MHz link capturing perfectly and forwarding nothing."""
+    node = Node(node_id=20)
+    packet = nexmon_packet(sample_csi(64))
+
+    assert node.on_packet(parse_nexmon(packet), 0) is not None
+    node.narrowband = True
+    assert node.on_packet(parse_nexmon(packet), 10_000) is not None
+    assert node.dropped_class == 0
+    assert node.link_changes == 0
+
+
+def test_a_20mhz_capture_is_never_evidence_of_other_traffic():
+    """So the gate sees silence and leaves the stimulus running — right at this width, where it
+    costs no subcarriers, and the alternative is toggling on its own echo."""
+    node = Node(node_id=20)
+    for i in range(10):
+        node.on_packet(parse_nexmon(nexmon_packet(sample_csi(64))), i * 10_000)
+    assert node.wideband_seen == 0
+
+
+def test_only_full_width_frames_count_as_other_peoples_traffic():
+    """What the gate reads. Counting our own stimulus here would make it disarm itself."""
+    node = Node(node_id=20)
+    node.narrowband = True
+    for i in range(5):
+        node.on_packet(
+            parse_nexmon(nexmon_packet(narrowband_csi(), chanspec=CHANSPEC_CH36_80)), i * 10_000
+        )
+    assert node.wideband_seen == 0
+
+    node.on_packet(
+        parse_nexmon(nexmon_packet(sample_csi(256), chanspec=CHANSPEC_CH36_80)), 60_000
+    )
+    # Seen, and counted, even though the mode meant it was not forwarded.
+    assert node.wideband_seen == 1
+    assert node.dropped_class == 1
+
+
+# -- the stimulus gate -------------------------------------------------------------------
+
+
+def gate(**kw) -> RateGate:
+    opts = dict(floor_hz=10.0, ceiling_hz=25.0, window_s=5.0, dwell_s=30.0)
+    opts.update(kw)
+    return RateGate(**opts)
+
+
+def feed(g: RateGate, *, seconds: float, rate_hz: float, start: float = 0.0) -> tuple[float, int]:
+    """Run `seconds` of traffic at `rate_hz` past the gate, one wakeup every 0.5 s."""
+    now, seen = start, 0
+    steps = int(seconds / 0.5)
+    for _ in range(steps):
+        now += 0.5
+        seen += int(rate_hz * 0.5)
+        g.update(now, seen)
+    return now, seen
+
+
+def test_the_gate_arms_when_the_channel_goes_quiet():
+    g = gate()
+    feed(g, seconds=20, rate_hz=0.0)
+    assert g.armed is True
+    assert g.changes == 1
+
+
+def test_the_gate_stays_off_while_there_is_real_traffic():
+    g = gate()
+    feed(g, seconds=60, rate_hz=100.0)
+    assert g.armed is False
+    assert g.changes == 0
+
+
+def test_the_gate_disarms_once_the_household_comes_back():
+    g = gate()
+    now, seen = feed(g, seconds=20, rate_hz=0.0)
+    assert g.armed is True
+    # Past the dwell, then real traffic well above the ceiling.
+    for _ in range(120):
+        now += 0.5
+        seen += 25
+        g.update(now, seen)
+    assert g.armed is False
+    assert g.changes == 2
+
+
+def test_the_hysteresis_band_holds_the_decision():
+    """Between the floor and the ceiling nothing changes, in either direction. Without the gap a
+    rate hovering at the threshold would toggle the subcarrier count every window."""
+    quiet = gate()
+    feed(quiet, seconds=20, rate_hz=0.0)
+    now, seen = feed(quiet, seconds=200, rate_hz=18.0, start=20.0)
+    assert quiet.armed is True  # above the floor, below the ceiling: stays armed
+
+    busy = gate()
+    feed(busy, seconds=200, rate_hz=18.0)
+    assert busy.armed is False  # same rate, opposite starting point, opposite answer
+
+
+def test_the_dwell_stops_the_gate_thrashing():
+    """Each decision costs the server the node's history, so they have to be rare."""
+    g = gate(dwell_s=30.0)
+    now, seen = 0.0, 0
+    # Alternate silence and a flood every window for five minutes.
+    for i in range(600):
+        now += 0.5
+        seen += 0 if (i // 10) % 2 == 0 else 25
+        g.update(now, seen)
+    assert g.changes <= 300 / 30 + 1
 
 
 # -- quantization ------------------------------------------------------------------------

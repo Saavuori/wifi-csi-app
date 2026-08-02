@@ -6,10 +6,13 @@ firmware to hand CSI to the host as UDP broadcasts on port 5500; this turns thos
 `docs/wire-format.md` uplink datagrams the server already ingests, so nothing downstream knows
 it is looking at a Pi.
 
-The node is a station probing its access point, which is the same topology the ESP32 firmware
-uses — and for the same reason. An associated radio is only handed CSI for frames addressed to
-it, so a node that only listens samples whenever the network happens to talk to it. Generating
-the traffic is what makes the rate a property of the node.
+A node that only listens samples whenever the network happens to talk near it, which makes the
+rate a property of the household rather than of the node. Generating the traffic is what fixes
+that, and there are two ways to do it here. `Prober` pings the access point over the wireless
+interface. `MulticastStimulus` emits multicast on the *wired* interface and lets the access
+point put it on the air, which is what a monitoring-only Pi — radio in monitor mode, Ethernet
+as its backbone — has available. The second costs subcarriers, for the reason `occupied_span`
+describes.
 
 Some of what the wire format carries is not in a nexmon packet, and each gap is handled here:
 
@@ -21,10 +24,13 @@ Some of what the wire format carries is not in a nexmon packet, and each gap is 
              (SO_TIMESTAMPNS), which is stamped in the driver rather than in this process, so
              it does not carry our scheduling jitter. This matters: the breathing estimator
              resamples on these timestamps and cannot repair one that is wrong.
-  rssi       upstream nexmon_csi carries no RSSI. Because the Pi stays associated we can read
-             the driver's own estimate from /proc/net/wireless. It is smoothed and slow, which
-             happens to be exactly what the server wants — its hybrid normalization only uses
-             RSSI through a 30-second EMA (see server/csi/dsp/preprocess.py).
+  rssi       upstream nexmon_csi carries no RSSI, so we read the driver's own estimate from
+             /proc/net/wireless. It is smoothed and slow, which happens to be exactly what the
+             server wants — its hybrid normalization only uses RSSI through a 30-second EMA (see
+             server/csi/dsp/preprocess.py). It does assume an association: a monitor radio has no
+             link for the driver to describe, and this is the first field to distrust there. The
+             7_45_189 build's 18-byte nexmon header carries a per-frame RSSI that supersedes it,
+             which parse_nexmon does not read yet.
   channel    decoded from the chanspec in the packet.
   link_epoch nexmon has no notion of one, but it reports the transmitter and the chanspec of
              every frame, and a change in either is exactly what the epoch exists to signal.
@@ -77,10 +83,31 @@ ETH_P_IP = 0x0800
 IPPROTO_UDP = 17
 NEXMON_UDP_PORT = 5500
 
+# -- the Ethernet stimulus ----------------------------------------------------------------
+
+# Any group inside 224.0.0.0/24 is the local network control block, which switches and access
+# points forward on every port regardless of IGMP snooping (RFC 4541 §2.1.2). That range is the
+# whole reason this works. The obvious-looking choice — an administratively scoped group like
+# 239.1.1.1 — is exactly what a snooping access point prunes, because nothing on the wireless
+# side has joined it, and the stimulus would then be emitted flawlessly and never reach the air.
+# Anything else in the block is equally fine; anything outside it is a bet on how this
+# particular access point is configured.
+STIMULUS_GROUP = "224.0.0.200"
+STIMULUS_PORT = 5510
+# Enough bytes to hold the air for a few hundred microseconds at the basic rate, which is what
+# buys a decent channel estimate. The text is here so that a tcpdump on some other machine says
+# what this traffic is instead of looking like a stray flood.
+STIMULUS_PAYLOAD = b"csi-node stimulus".ljust(200, b"\x00")
+# How long the capture loop will block for a frame before waking to run the gate and the status
+# line anyway. Short enough that a silent channel is noticed promptly, long enough to cost
+# nothing on a Pi.
+CAPTURE_WAKEUP_S = 0.5
+
 # Linux-only, and both are 35. Named here with a fallback so this module imports on a
 # developer machine — the tests run anywhere, the node itself only ever runs on a Pi.
 SO_TIMESTAMPNS = getattr(socket, "SO_TIMESTAMPNS", 35)
 SCM_TIMESTAMPNS = getattr(socket, "SCM_TIMESTAMPNS", 35)
+SO_BINDTODEVICE = getattr(socket, "SO_BINDTODEVICE", 25)
 
 # `struct timespec` as SCM_TIMESTAMPNS delivers it, keyed by the length of the control message:
 # two 64-bit words on a 64-bit userspace, two 32-bit words on a 32-bit one. See `timestamp_us`.
@@ -184,6 +211,58 @@ def chanspec_sec_channel(chanspec: int) -> int:
     if (chanspec & CHANSPEC_SB_MASK) == CHANSPEC_SB_LOWER:
         return SEC_CHANNEL_ABOVE
     return SEC_CHANNEL_BELOW
+
+
+# -- narrowband frames --------------------------------------------------------------------
+
+# nexmon reports the chanspec the *chip* is tuned to, not the width of the frame that triggered
+# the capture, and hands up a full FFT either way. So a 20 MHz PPDU arriving while the chip sits
+# on an 80 MHz chanspec comes out as 256 subcarriers of which 64 carry signal and 192 carry
+# noise — indistinguishable by shape from a real 80 MHz measurement.
+#
+# This is not a corner case, and it is not new with the stimulus. Every beacon is legacy 20 MHz,
+# and so is everything an access point sends to a broadcast address, which is precisely what
+# MulticastStimulus provokes. Forwarded whole, each of those frames asks the server to normalize
+# across three quarters of noise.
+#
+# Detection is a comparison between 64-subcarrier blocks: a narrowband frame puts all of its
+# energy into one of them.
+NARROWBAND_BLOCK = 64
+# A real full-width frame can be deeply frequency-selective, but not by this much once each
+# block is averaged down to one number. Too high leaves noise in the frame; too low truncates a
+# good one. Both are quiet failures, which is why it is a named constant and a flag.
+NARROWBAND_MARGIN_DB = 12.0
+
+
+def occupied_span(csi: np.ndarray, margin_db: float = NARROWBAND_MARGIN_DB) -> slice | None:
+    """The 20 MHz block a narrowband frame occupies, or None if the frame fills the capture.
+
+    None for a capture that is already 20 MHz: there is nothing to compare against and nothing
+    to trim.
+
+    The block index deliberately does not become a channel number. Which quarter of the FFT is
+    which 20 MHz sub-band depends on whether nexmon hands its output in frequency order or in
+    raw FFT order, and that is a convention this has not confirmed on hardware. The trim itself
+    does not care, because the sub-bands are contiguous 64-bin blocks under either convention —
+    but a channel derived from the index would be a coin flip, and a confidently wrong channel
+    is the exact failure `_plausible_chanspec` exists to avoid.
+    """
+    blocks = csi.size // NARROWBAND_BLOCK
+    if blocks < 2 or csi.size % NARROWBAND_BLOCK:
+        return None
+
+    power = (np.abs(csi) ** 2).reshape(blocks, NARROWBAND_BLOCK).mean(axis=1)
+    best = int(np.argmax(power))
+    if power[best] <= 0.0:
+        return None
+
+    # Against the loudest of the others rather than their average: three quiet blocks and one
+    # loud one is the shape being looked for, and taking the maximum is the reading least likely
+    # to call a real frame narrow.
+    loudest_other = float(np.delete(power, best).max())
+    if loudest_other > 0.0 and 10.0 * np.log10(power[best] / loudest_other) < margin_db:
+        return None
+    return slice(best * NARROWBAND_BLOCK, (best + 1) * NARROWBAND_BLOCK)
 
 
 # -- quantization -----------------------------------------------------------------------
@@ -421,10 +500,15 @@ def checksum(data: bytes) -> int:
 class Prober(threading.Thread):
     """Pings the access point so that there is something to measure.
 
-    While associated the chip only hands up CSI for frames addressed to this Pi (plus
-    broadcast), so with no traffic of our own the rate collapses to the beacon rate. This is
-    the same problem the station firmware solves with CSI_PROBE_UDP_ECHO, and the same fix:
-    generate the traffic, measure the reply.
+    Superseded, and kept only because the associated-mode path around it has not been removed
+    yet. The premise was that an associated chip hands up CSI for frames addressed to this Pi,
+    so provoking replies would set the rate — the same trick CSI_PROBE_UDP_ECHO plays in the
+    station firmware. Measured on hardware, those replies are precisely what never arrives: the
+    extractor's ucode deafens the PHY across every CSI dump and unicast data dies there, so an
+    associated Pi sees beacons and broadcast and nothing else. See pi/README.md.
+
+    MulticastStimulus is the working answer, and it works because it never needs a frame
+    addressed to this Pi at all.
     """
 
     def __init__(self, target: str, hz: float) -> None:
@@ -467,6 +551,163 @@ class Prober(threading.Thread):
         sock.close()
 
 
+class MulticastStimulus(threading.Thread):
+    """Emits multicast on the wired interface so the access point has something to transmit.
+
+    For a Pi whose radio does nothing but listen, this is the only way to make the capture rate
+    a property of the node. The packet leaves over Ethernet, the access point floods it onto
+    every BSS it bridges, and the monitor radio measures the access point's transmission of it.
+    Nothing has to be associated on the wireless side, and no second device has to exist —
+    which is what separates this from stimulating the channel through another station.
+
+    What it costs is width. Broadcast and multicast go out at the basic rate: legacy OFDM,
+    20 MHz. So an 80 MHz capture that would be 256 subcarriers of household traffic becomes 64
+    subcarriers while this is running. That is why it is a fallback rather than the default, and
+    why `RateGate` only arms it when there is nothing better to measure.
+
+    Armed and disarmed from the capture loop rather than starting and stopping, so that a
+    transition costs an Event set instead of a thread and a socket.
+    """
+
+    def __init__(self, iface: str, group: str, port: int, hz: float) -> None:
+        super().__init__(name="stimulus", daemon=True)
+        self.iface = iface
+        self.group = group
+        self.port = port
+        self.interval = 1.0 / hz if hz > 0 else 0.0
+        self.sent = 0
+        self.failures = 0
+        self.failed = False
+        self._armed = threading.Event()
+        self._stop = threading.Event()
+
+    def arm(self, on: bool) -> None:
+        if on:
+            self._armed.set()
+        else:
+            self._armed.clear()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._armed.set()
+
+    def _open(self) -> socket.socket:
+        """A socket pinned to the wired interface.
+
+        Pinned twice over, because the one mistake this feature cannot survive is the packets
+        leaving somewhere else — they would be sent perfectly, counted as sent, and never touch
+        the air. IP_MULTICAST_IF is the option that actually governs multicast egress;
+        SO_BINDTODEVICE also settles the source address and stops a default route on another
+        interface from winning. `Prober` shipped with this bug in the other direction, sending
+        every probe out of eth0 when it wanted wlan0, and it looked exactly like a dead radio.
+        """
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # struct ip_mreqn { in_addr imr_multiaddr; in_addr imr_address; int imr_ifindex; } —
+        # selecting by index rather than by address, so this needs no IP on the interface.
+        index = socket.if_nametoindex(self.iface)
+        sock.setsockopt(
+            socket.IPPROTO_IP,
+            socket.IP_MULTICAST_IF,
+            struct.pack("@4s4si", b"\x00" * 4, b"\x00" * 4, index),
+        )
+        sock.setsockopt(socket.SOL_SOCKET, SO_BINDTODEVICE, self.iface.encode() + b"\x00")
+        # One hop. This is for the local segment and has no business past the first router.
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0)
+        return sock
+
+    def run(self) -> None:
+        try:
+            sock = self._open()
+        except OSError as exc:
+            log.error("cannot emit the stimulus on %s: %s", self.iface, exc)
+            self.failed = True
+            return
+
+        target = (self.group, self.port)
+        due = time.monotonic()
+        while not self._stop.is_set():
+            if not self._armed.is_set():
+                self._armed.wait(0.2)
+                # Restart the schedule rather than catching up on everything not sent while
+                # disarmed, which would arrive as one burst.
+                due = time.monotonic()
+                continue
+            try:
+                sock.sendto(STIMULUS_PAYLOAD, target)
+                self.sent += 1
+            except OSError:
+                self.failures += 1
+
+            due += self.interval
+            now = time.monotonic()
+            if due < now:
+                due = now
+            self._stop.wait(due - now)
+        sock.close()
+
+
+class RateGate:
+    """Decides whether the stimulus should be running, from how busy the channel already is.
+
+    Kept free of sockets and of the clock so the whole policy can be tested directly.
+
+    The input is the count of *full-width* frames seen, not of all frames. That distinction is
+    what stops the gate oscillating: once armed, the stimulus produces narrowband frames, and a
+    gate that counted those would immediately decide the channel was busy, disarm, watch the
+    rate collapse and arm again. Full-width frames are the ones this node did not cause, so they
+    are the only honest answer to "is anyone else using this channel".
+
+    Two guards against flapping on top of that. The ceiling sits above the floor, so the rate
+    has to travel a real distance to change the decision. And no decision stands for less than
+    `dwell_s`, because each transition changes the subcarrier count, which the server answers by
+    dropping the node's history — cheap once in a while, ruinous every few seconds.
+    """
+
+    def __init__(
+        self, *, floor_hz: float, ceiling_hz: float, window_s: float, dwell_s: float
+    ) -> None:
+        self.floor_hz = floor_hz
+        self.ceiling_hz = ceiling_hz
+        self.window_s = window_s
+        self.dwell_s = dwell_s
+
+        self.armed = False
+        self.changes = 0
+        self.rate = 0.0
+
+        self._seen = 0
+        self._window_end: float | None = None
+        self._next_change = 0.0
+
+    def update(self, now: float, wideband_seen: int) -> bool:
+        """Called on every wakeup with the node's running full-width frame count."""
+        if self._window_end is None:
+            self._window_end = now + self.window_s
+            self._next_change = now
+            self._seen = wideband_seen
+            return self.armed
+        if now < self._window_end:
+            return self.armed
+
+        self.rate = (wideband_seen - self._seen) / self.window_s
+        self._seen = wideband_seen
+        self._window_end = now + self.window_s
+
+        if now < self._next_change:
+            return self.armed
+        if not self.armed and self.rate < self.floor_hz:
+            self.armed = True
+        elif self.armed and self.rate >= self.ceiling_hz:
+            self.armed = False
+        else:
+            return self.armed
+
+        self.changes += 1
+        self._next_change = now + self.dwell_s
+        return self.armed
+
+
 # -- the node -----------------------------------------------------------------------------
 
 
@@ -489,8 +730,16 @@ class Node:
         self.frames = 0
         self.skipped_stream = 0
         self.link_changes = 0
+        self.dropped_class = 0
+        # Every full-width frame seen, forwarded or not. RateGate reads it.
+        self.wideband_seen = 0
 
-        self._link: tuple[bytes, int] | None = None
+        # Which class of frame this node is currently forwarding. False is full width — real
+        # traffic. True is the 20 MHz world the Ethernet stimulus lives in. The capture loop
+        # flips it; see RateGate.
+        self.narrowband = False
+
+        self._link: tuple[bytes, int, int] | None = None
         self._t0_us: int | None = None
 
     def on_packet(self, pkt: NexmonPacket, capture_us: int) -> bytes | None:
@@ -502,7 +751,35 @@ class Node:
             self.skipped_stream += 1
             return None
 
-        link = (pkt.src_mac, pkt.chanspec)
+        # A 20 MHz capture is a single block with nothing to compare it against, so there are no
+        # classes to be in and no width to lose by stimulating. Everything is forwarded whatever
+        # mode this node believes it is in — without this, `--stimulus always` on a 20 MHz link
+        # would drop every frame it captured — and nothing counts as somebody else's traffic,
+        # because none of it can be told apart from our own. The gate then sees silence and
+        # leaves the stimulus on, which at this width is the right answer.
+        splittable = pkt.csi.size >= 2 * NARROWBAND_BLOCK
+
+        span = occupied_span(pkt.csi)
+        if span is None and splittable:
+            # Counted whether or not it is forwarded. "Is anyone else using this channel" is the
+            # question the gate is asking, and a full-width frame is the only honest answer —
+            # the narrowband ones may well be this node's own stimulus coming back.
+            self.wideband_seen += 1
+        if splittable and (span is not None) != self.narrowband:
+            # The wrong class for the mode this node is in. Forwarding both would flip n_sub
+            # from frame to frame, and the server answers a subcarrier-mask change by throwing
+            # the node's history away — so the mask has to be a property of the mode rather than
+            # of whichever frame happened to arrive.
+            self.dropped_class += 1
+            return None
+
+        csi = pkt.csi if span is None else pkt.csi[span]
+
+        # n_sub belongs in the link key for the same reason the transmitter does: a change of
+        # width is a change of what is being measured, and every baseline built on the old width
+        # describes a different instrument. At 20 MHz both modes yield 64 subcarriers, so
+        # switching there changes nothing and the epoch correctly stays put.
+        link = (pkt.src_mac, pkt.chanspec, csi.size)
         if self._link is not None and link != self._link:
             # Roam, reconnect or a channel switch by the access point. Every baseline built on
             # the old link describes a room that is no longer the one being measured, so the
@@ -514,11 +791,13 @@ class Node:
             self.link_changes += 1
             self.epoch = (self.epoch + 1) & 0xFF
             log.info(
-                "link changed (%s ch%d -> %s ch%d); epoch now %d",
+                "link changed (%s ch%d %d sub -> %s ch%d %d sub); epoch now %d",
                 _fmt_mac(self._link[0]),
                 chanspec_channel(self._link[1]),
+                self._link[2],
                 _fmt_mac(pkt.src_mac),
                 chanspec_channel(pkt.chanspec),
+                csi.size,
                 self.epoch,
             )
         self._link = link
@@ -535,11 +814,17 @@ class Node:
             timestamp_us=elapsed,
             rssi=self.rssi,
             noise_floor=self.noise,
+            # The chanspec's own channel either way, which for a trimmed frame is the centre of
+            # the block the chip is tuned to rather than the 20 MHz the frame actually used.
+            # Coarse on purpose — see occupied_span on why the block index is not a channel.
             channel=chanspec_channel(pkt.chanspec),
-            sec_channel=chanspec_sec_channel(pkt.chanspec),
-            data=quantize(pkt.csi),
+            sec_channel=(
+                SEC_CHANNEL_NONE if span is not None else chanspec_sec_channel(pkt.chanspec)
+            ),
+            data=quantize(csi),
             # The one v2 field nexmon answers directly: the transmitter of the frame this
-            # measurement came from, which for an associated Pi is the access point.
+            # measurement came from. In monitor mode that is whoever was talking, not
+            # necessarily the access point, which is why the CSI_AP_MAC filter exists.
             src_mac=pkt.src_mac,
             link_epoch=self.epoch,
         )
@@ -567,6 +852,11 @@ def run(args: argparse.Namespace) -> int:
         log.error("cannot capture on %s: %s", args.iface, exc)
         return 1
 
+    # A blocking recvmsg parks this thread until the next frame arrives, and "no frames are
+    # arriving" is both the condition the stimulus exists to break and the moment a status line
+    # is worth the most. Neither can happen from inside a blocked read, so wake up anyway.
+    capture.settimeout(CAPTURE_WAKEUP_S)
+
     out = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     server = (args.server, args.port)
 
@@ -581,6 +871,33 @@ def run(args: argparse.Namespace) -> int:
             prober = Prober(target, args.probe_hz)
             prober.start()
 
+    stimulus = None
+    gate = None
+    if args.stimulus != "off" and args.stimulus_hz > 0:
+        stimulus = MulticastStimulus(
+            args.stimulus_iface, args.stimulus_group, args.stimulus_port, args.stimulus_hz
+        )
+        stimulus.start()
+        if args.stimulus == "always":
+            node.narrowband = True
+            stimulus.arm(True)
+            log.info(
+                "stimulus: %s -> %s:%d at %g Hz, always on; measuring at 20 MHz",
+                args.stimulus_iface, args.stimulus_group, args.stimulus_port, args.stimulus_hz,
+            )
+        else:
+            gate = RateGate(
+                floor_hz=args.stimulus_floor_hz,
+                ceiling_hz=args.stimulus_ceiling_hz,
+                window_s=args.stimulus_window,
+                dwell_s=args.stimulus_dwell,
+            )
+            log.info(
+                "stimulus: %s -> %s:%d at %g Hz, arming below %g Hz of real traffic",
+                args.stimulus_iface, args.stimulus_group, args.stimulus_port,
+                args.stimulus_hz, args.stimulus_floor_hz,
+            )
+
     log.info(
         "node %d: %s -> %s:%d, core %d stream %d",
         args.node_id, args.iface, args.server, args.port, args.core, args.spatial,
@@ -588,43 +905,85 @@ def run(args: argparse.Namespace) -> int:
 
     bad = 0
     unstamped = 0
+    n_sub = 0
     reported = time.monotonic()
     try:
         while True:
-            packet, ancdata, _flags, _addr = capture.recvmsg(4096, socket.CMSG_SPACE(64))
-            payload = udp_payload(packet, NEXMON_UDP_PORT)
-            if payload is None:
-                continue
-
-            pkt = parse_nexmon(payload)
-            if pkt is None:
-                bad += 1
-                continue
+            try:
+                packet, ancdata, _flags, _addr = capture.recvmsg(4096, socket.CMSG_SPACE(64))
+            except TimeoutError:
+                packet, ancdata = None, ()
 
             now = time.monotonic()
             stats.refresh(now)
             node.rssi, node.noise = stats.rssi, stats.noise
 
-            capture_us = timestamp_us(ancdata)
-            if capture_us is None:
-                # No kernel timestamp: fall back, but say so, because this silently degrades
-                # the breathing estimate rather than breaking anything visibly.
-                capture_us = time.clock_gettime_ns(time.CLOCK_REALTIME) // 1000
-                if unstamped == 0:
-                    log.warning("no SO_TIMESTAMPNS; timestamps will carry scheduling jitter")
-                unstamped += 1
+            payload = udp_payload(packet, NEXMON_UDP_PORT) if packet is not None else None
+            if payload is not None:
+                pkt = parse_nexmon(payload)
+                if pkt is None:
+                    bad += 1
+                else:
+                    capture_us = timestamp_us(ancdata)
+                    if capture_us is None:
+                        # No kernel timestamp: fall back, but say so, because this silently
+                        # degrades the breathing estimate rather than breaking anything visibly.
+                        capture_us = time.clock_gettime_ns(time.CLOCK_REALTIME) // 1000
+                        if unstamped == 0:
+                            log.warning(
+                                "no SO_TIMESTAMPNS; timestamps will carry scheduling jitter"
+                            )
+                        unstamped += 1
 
-            datagram = node.on_packet(pkt, capture_us)
-            if datagram is not None:
-                out.sendto(datagram, server)
+                    datagram = node.on_packet(pkt, capture_us)
+                    if datagram is not None:
+                        # From the datagram rather than from the packet, because a trimmed frame
+                        # carries fewer subcarriers than the one that arrived and the operator
+                        # wants to know what is actually being sent.
+                        n_sub = (len(datagram) - _WIRE_HEADER.size) // 2
+                        out.sendto(datagram, server)
+
+            if gate is not None:
+                armed = gate.update(now, node.wideband_seen)
+                if armed != node.narrowband:
+                    node.narrowband = armed
+                    stimulus.arm(armed)
+                    log.info(
+                        "%s the stimulus: %.1f Hz of real traffic; measuring at %s from here",
+                        "arming" if armed else "disarming",
+                        gate.rate,
+                        "20 MHz" if armed else "full width",
+                    )
 
             if args.status_interval > 0 and now - reported >= args.status_interval:
                 rate = node.frames / max(now - reported, 1e-9)
+                extra = ""
+                if stimulus is not None:
+                    extra = ", stimulus %s (%d sent)" % (
+                        "on" if node.narrowband else "off", stimulus.sent,
+                    )
                 log.info(
                     "%d frames (%.1f Hz), %d subcarriers, rssi %d dBm, %d link changes, "
-                    "%d malformed, %d unstamped",
-                    node.frames, rate, pkt.n_sub, node.rssi, node.link_changes, bad, unstamped,
+                    "%d malformed, %d unstamped, %d off-class%s",
+                    node.frames, rate, n_sub, node.rssi, node.link_changes, bad, unstamped,
+                    node.dropped_class, extra,
                 )
+                if (
+                    stimulus is not None
+                    and node.narrowband
+                    and stimulus.sent > 0
+                    and node.frames == 0
+                ):
+                    # Emitting into a void. Worth a warning of its own because everything above
+                    # looks healthy — the packets really are being sent — and the fault is a
+                    # switch or access point silently declining to put them on the air.
+                    log.warning(
+                        "%d stimulus packets sent and nothing came back. The access point is "
+                        "probably not flooding %s onto the wireless side: check that %s is "
+                        "bridged to the same network as the AP, that the group is inside "
+                        "224.0.0.0/24, and that the monitor radio is on the AP's channel.",
+                        stimulus.sent, args.stimulus_group, args.stimulus_iface,
+                    )
                 node.frames = 0
                 reported = now
     except KeyboardInterrupt:
@@ -632,6 +991,8 @@ def run(args: argparse.Namespace) -> int:
     finally:
         if prober is not None:
             prober.stop()
+        if stimulus is not None:
+            stimulus.stop()
         capture.close()
         out.close()
     return 0
@@ -658,6 +1019,34 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--probe-hz", type=float,
                    default=float(os.environ.get("CSI_PROBE_HZ", "100")),
                    help="probe rate, 0 to disable (default 100)")
+    p.add_argument("--stimulus",
+                   default=os.environ.get("CSI_STIMULUS", "auto"),
+                   choices=("auto", "always", "off"),
+                   help="Ethernet multicast stimulus: arm it when the channel goes quiet "
+                        "(auto), run it unconditionally (always), or never (off)")
+    p.add_argument("--stimulus-iface",
+                   default=os.environ.get("CSI_STIMULUS_IFACE", "eth0"),
+                   help="wired interface to emit on (default eth0)")
+    p.add_argument("--stimulus-group",
+                   default=os.environ.get("CSI_STIMULUS_GROUP", STIMULUS_GROUP),
+                   help=f"multicast group (default {STIMULUS_GROUP}; stay inside 224.0.0.0/24 "
+                        "or a snooping access point will prune it)")
+    p.add_argument("--stimulus-port", type=int,
+                   default=int(os.environ.get("CSI_STIMULUS_PORT", str(STIMULUS_PORT))),
+                   help=f"multicast port (default {STIMULUS_PORT})")
+    p.add_argument("--stimulus-hz", type=float,
+                   default=float(os.environ.get("CSI_STIMULUS_HZ", "50")),
+                   help="emission rate while armed, 0 to disable (default 50)")
+    p.add_argument("--stimulus-floor-hz", type=float,
+                   default=float(os.environ.get("CSI_STIMULUS_FLOOR_HZ", "10")),
+                   help="arm below this many full-width frames per second (default 10)")
+    p.add_argument("--stimulus-ceiling-hz", type=float,
+                   default=float(os.environ.get("CSI_STIMULUS_CEILING_HZ", "25")),
+                   help="disarm above this many (default 25; must exceed the floor)")
+    p.add_argument("--stimulus-window", type=float, default=5.0,
+                   help="seconds the gate averages the frame rate over (default 5)")
+    p.add_argument("--stimulus-dwell", type=float, default=30.0,
+                   help="minimum seconds between gate decisions (default 30)")
     p.add_argument("--rssi-interval", type=float, default=1.0,
                    help="seconds between /proc/net/wireless reads (default 1)")
     p.add_argument("--status-interval", type=float, default=10.0,
@@ -667,6 +1056,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     if not 1 <= args.node_id <= 254:
         p.error("--node-id must be 1..254; 0 and 255 are reserved")
+    # argparse checks `choices` for values it parsed off the command line, but not for a default
+    # — and this default comes from /etc/default/csi-node, which is hand-edited. Left unchecked,
+    # `CSI_STIMULUS=Auto` reads as neither "always" nor "off" and lands silently in gated mode.
+    if args.stimulus not in ("auto", "always", "off"):
+        p.error(f"--stimulus must be auto, always or off (got {args.stimulus!r})")
+    # Equal bounds would make the gate flip on every window; inverted ones would latch. Both
+    # are configuration mistakes that look like a working node until you read the epoch count.
+    if args.stimulus_ceiling_hz <= args.stimulus_floor_hz:
+        p.error("--stimulus-ceiling-hz must exceed --stimulus-floor-hz; the gap is the "
+                "hysteresis that stops the gate oscillating")
     return args
 
 

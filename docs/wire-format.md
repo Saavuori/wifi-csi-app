@@ -88,7 +88,7 @@ several are *synthesized* rather than read from the radio, and it is worth knowi
 | `seq` | incremented per CSI callback | minted per forwarded frame; the 802.11 sequence number is *not* used |
 | `rssi` | `wifi_pkt_rx_ctrl_t` | the driver's estimate from `/proc/net/wireless`, sampled at 1 Hz |
 | `noise_floor` | `wifi_pkt_rx_ctrl_t` | usually unavailable; sent as 0 |
-| `src_mac` | the associated BSSID | read from the nexmon packet |
+| `src_mac` | the associated BSSID | read from the nexmon packet: whoever transmitted the frame |
 | `link_epoch` | incremented on association | incremented when the transmitter or chanspec changes |
 | `data` | `memcpy` of the driver's int8 buffer | int16 scaled per frame into int8 |
 
