@@ -47,11 +47,19 @@ def nexmon_packet(
     spatial: int = 0,
     chanspec: int = CHANSPEC_CH6,
     chanspec_big_endian: bool = False,
+    rssi: int = -40,
 ) -> bytes:
     """Build a nexmon CSI payload. `csi` is complex; real and imag are stored int16."""
     chan = struct.pack(">H" if chanspec_big_endian else "<H", chanspec)
+    # magic u16 | rssi i8 | fctl u8 | src_mac 6 | seq u16 | core/spatial u16 | chanspec u16 |
+    # chip u16. The rssi/fctl pair used to be missing here *and* in csi_node, so these tests
+    # agreed with the parser and both were wrong: a real 80 MHz frame is 1042 bytes, which a
+    # 16-byte header turns into 1026 -- not a multiple of 4, so every live frame was rejected
+    # while the suite stayed green. Byte counts here now come from a real capture.
     header = (
         struct.pack("<H", csi_node.NEXMON_MAGIC)
+        + struct.pack("<b", rssi)
+        + struct.pack("<B", 0x80)
         + src_mac
         + struct.pack("<H", seq)
         + struct.pack("<H", (spatial << 3) | core)
@@ -700,3 +708,38 @@ def test_timestamp_us_rejects_a_length_it_does_not_recognise():
 
     anc = [(s.SOL_SOCKET, csi_node.SCM_TIMESTAMPNS, b"\x00" * 12)]
     assert timestamp_us(anc) is None
+
+
+# --- a real frame, off real hardware -------------------------------------------------------
+#
+# Everything else in this file builds packets with the same code that reads them, so a wrong
+# header layout agrees with itself and the suite stays green. It did, for the whole life of
+# NEXMON_HEADER_SIZE = 16, while the node rejected every genuine frame it ever saw.
+#
+# These are the first 18 bytes of an actual capture: bcm43455c0, 7.45.189, Pi 4 on Debian 13,
+# associated to a 5 GHz AP on channel 40 at 80 MHz. The full payload was 1042 bytes.
+REAL_FRAME_HEADER = bytes.fromhex("1111e3807ada88a3034c80ab00002ae16500")
+REAL_FRAME_LEN = 1042
+REAL_AP_MAC = bytes.fromhex("7ada88a3034c")
+REAL_CHANSPEC = 0xE12A  # what `nexutil -Iwlan0 -k` reported for the same link
+
+
+def test_parses_a_real_capture_header():
+    payload = REAL_FRAME_HEADER + bytes(REAL_FRAME_LEN - len(REAL_FRAME_HEADER))
+    pkt = parse_nexmon(payload)
+
+    assert pkt is not None, "a genuine nexmon frame must parse"
+    # (1042 - 18) / 4 -- an 80 MHz capture on this chip.
+    assert pkt.n_sub == 256
+    assert pkt.src_mac == REAL_AP_MAC
+    assert pkt.chanspec == REAL_CHANSPEC
+    assert pkt.core == 0 and pkt.spatial == 0
+
+
+def test_real_frame_length_is_incompatible_with_a_16_byte_header():
+    """The specific arithmetic that made the old layout reject live frames silently.
+
+    1042 - 16 = 1026, and 1026 % 4 == 2, so the int16-pair check failed for every frame.
+    """
+    assert (REAL_FRAME_LEN - 16) % 4 != 0
+    assert (REAL_FRAME_LEN - NEXMON_HEADER_SIZE) % 4 == 0

@@ -197,6 +197,41 @@ so the DSP was tuned on it. The real cost is that `preprocess.py`'s AGC step det
 fire on Pi frames: per-frame scaling removes the step before the server sees it. The step is
 gone rather than flagged.
 
+## Known limitation: nexutil cannot reach the firmware
+
+Verified on a Pi 4 Model B, Debian 13 (trixie), kernel 6.12, on 2026-08-01. Everything up to the
+capture works: the firmware builds, installs and loads —
+`brcmfmac: Firmware: BCM4345/6 wl0: version 7.45.189 (nexmon.org/csi: 54de-4)` — and `wlan0`
+stays associated on channel 40 at 80 MHz, which is the 256-subcarrier configuration.
+
+What does not work is configuring the extractor. `nexutil` has two transports and neither
+reaches this driver:
+
+| Build | Result |
+|---|---|
+| `-DUSE_NETLINK` (upstream default) | `nex_init_netlink: socket error (93: Protocol not supported)` |
+| ioctl (no netlink) | `__nex_driver_io: error ret=-1 errno=95` (`EOPNOTSUPP`) |
+
+Netlink needs nexmon's **patched brcmfmac module**, and the fork ships those only for kernels
+4.19, 5.4 and 5.10. The ioctl path needs private ioctls the stock brcmfmac no longer accepts.
+So `csi-connected.sh` configures nothing, and `tcpdump -i wlan0 dst port 5500` is silent.
+
+The netlink build fails especially badly: its socket error goes to stderr but it still **exits
+0**, so `csi-connected.sh`'s own error check passes and it prints "CSI collection enabled"
+having done nothing. `install-node.sh` now builds the ioctl variant instead, which at least
+fails visibly.
+
+One further symptom worth knowing: with the patched firmware loaded, `wlan0` associates and
+gets IPv6 by SLAAC but **never completes DHCP**. Transmission works — DHCP requests are visible
+on the air — but no reply is received. A Pi reached only over Wi-Fi will disappear after the
+reboot that loads this firmware. Have Ethernet or a console attached.
+
+To undo:
+
+```bash
+sudo /opt/csi-node/uninstall.sh && sudo reboot
+```
+
 ## Checking it works
 
 ```bash
