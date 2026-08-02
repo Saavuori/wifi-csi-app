@@ -652,9 +652,10 @@ footer p { margin: 0; }
     <div class="node-card">
       <span class="label">Option B</span>
       <h3>Raspberry Pi + nexmon_csi</h3>
-      <p>A Pi 3B+, 4, 5 or CM4 patched to report CSI while staying associated, so the same box
-        can be sensor, server and UI at once. Four times the frequency resolution, paid for in
-        kernel-level timestamps and per-frame amplitude scaling.</p>
+      <p>A Pi 3B+, 4, 5 or CM4 patched to report CSI while it listens, so the same box can be
+        sensor, server and UI at once. Four times the frequency resolution, paid for in
+        kernel-level timestamps, per-frame amplitude scaling, and a wired uplink — the CSI
+        firmware costs the radio its own data connection.</p>
       <dl class="node-spec">
         <div><dt>Subcarriers</dt><dd>up to 256 (80 MHz)</dd></div>
         <div><dt>Timestamp</dt><dd>kernel, SO_TIMESTAMPNS</dd></div>

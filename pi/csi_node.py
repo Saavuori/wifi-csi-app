@@ -24,10 +24,13 @@ Some of what the wire format carries is not in a nexmon packet, and each gap is 
              (SO_TIMESTAMPNS), which is stamped in the driver rather than in this process, so
              it does not carry our scheduling jitter. This matters: the breathing estimator
              resamples on these timestamps and cannot repair one that is wrong.
-  rssi       upstream nexmon_csi carries no RSSI. Because the Pi stays associated we can read
-             the driver's own estimate from /proc/net/wireless. It is smoothed and slow, which
-             happens to be exactly what the server wants — its hybrid normalization only uses
-             RSSI through a 30-second EMA (see server/csi/dsp/preprocess.py).
+  rssi       upstream nexmon_csi carries no RSSI, so we read the driver's own estimate from
+             /proc/net/wireless. It is smoothed and slow, which happens to be exactly what the
+             server wants — its hybrid normalization only uses RSSI through a 30-second EMA (see
+             server/csi/dsp/preprocess.py). It does assume an association: a monitor radio has no
+             link for the driver to describe, and this is the first field to distrust there. The
+             7_45_189 build's 18-byte nexmon header carries a per-frame RSSI that supersedes it,
+             which parse_nexmon does not read yet.
   channel    decoded from the chanspec in the packet.
   link_epoch nexmon has no notion of one, but it reports the transmitter and the chanspec of
              every frame, and a change in either is exactly what the epoch exists to signal.
@@ -497,10 +500,15 @@ def checksum(data: bytes) -> int:
 class Prober(threading.Thread):
     """Pings the access point so that there is something to measure.
 
-    While associated the chip only hands up CSI for frames addressed to this Pi (plus
-    broadcast), so with no traffic of our own the rate collapses to the beacon rate. This is
-    the same problem the station firmware solves with CSI_PROBE_UDP_ECHO, and the same fix:
-    generate the traffic, measure the reply.
+    Superseded, and kept only because the associated-mode path around it has not been removed
+    yet. The premise was that an associated chip hands up CSI for frames addressed to this Pi,
+    so provoking replies would set the rate — the same trick CSI_PROBE_UDP_ECHO plays in the
+    station firmware. Measured on hardware, those replies are precisely what never arrives: the
+    extractor's ucode deafens the PHY across every CSI dump and unicast data dies there, so an
+    associated Pi sees beacons and broadcast and nothing else. See pi/README.md.
+
+    MulticastStimulus is the working answer, and it works because it never needs a frame
+    addressed to this Pi at all.
     """
 
     def __init__(self, target: str, hz: float) -> None:
@@ -815,7 +823,8 @@ class Node:
             ),
             data=quantize(csi),
             # The one v2 field nexmon answers directly: the transmitter of the frame this
-            # measurement came from, which for an associated Pi is the access point.
+            # measurement came from. In monitor mode that is whoever was talking, not
+            # necessarily the access point, which is why the CSI_AP_MAC filter exists.
             src_mac=pkt.src_mac,
             link_epoch=self.epoch,
         )
