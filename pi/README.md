@@ -8,7 +8,7 @@ without a code change anywhere else.
 | | |
 |---|---|
 | Hardware | Pi 3B+, 4, 5 or CM4 — anything with the BCM43455 |
-| Subcarriers | 64 / 128 / 256, following the channel width the AP uses |
+| Subcarriers | 64 / 128 / 256, following the width of the frames being measured |
 | Firmware | [nexmon_csi](https://github.com/seemoo-lab/nexmon_csi), via [our fork](https://github.com/Saavuori/nexmon_csi) |
 | Runs as | `csi-node.service` |
 
@@ -86,6 +86,40 @@ node's history. That is the correct response: every baseline built on the old li
 a different room. The clock and the sequence counter stay monotonic across it, so the server
 records a roam rather than a roam *and* a reboot.
 
+## The Ethernet stimulus
+
+A Pi whose radio only listens — monitor mode, Ethernet as its backbone — cannot generate the
+traffic it measures over the air. What it can do is put a packet on the wire and let the access
+point transmit it: multicast sent out of `eth0` is flooded onto every BSS the AP bridges, so the
+monitor radio measures the AP's transmission of it. Nothing has to be associated, and no second
+wireless device has to exist anywhere in the house.
+
+That is `--stimulus`, and by default it is a fallback rather than a source. The node watches how
+many full-width frames the channel already carries and only emits when that rate falls below
+`--stimulus-floor-hz`; when the household comes back above `--stimulus-ceiling-hz`, it stops.
+The gap between the two, plus `--stimulus-dwell`, is what stops it toggling.
+
+**It costs the subcarrier count.** Multicast and broadcast go out at the basic rate — legacy
+OFDM, 20 MHz — whatever width the AP normally uses. On an 80 MHz chanspec the chip still hands
+up 256 subcarriers, because nexmon reports the width the *chip* is tuned to rather than the
+width of the frame that triggered the capture; 64 of them carry signal and the other 192 carry
+noise. The node detects that (`occupied_span`) and forwards only the 64 that are real, so a
+stimulated capture is an honest 20 MHz measurement instead of a dishonest 80 MHz one.
+
+Engaging and disengaging therefore changes `n_sub`, which the server answers by dropping the
+node's history. That is the correct response — it is a different measurement — and it is why
+the gate is deliberately slow to change its mind.
+
+The same trim applies to beacons, which are legacy 20 MHz for the same reason. Before this they
+were forwarded whole, three quarters noise.
+
+**The group has to be inside 224.0.0.0/24.** That range is the local network control block, and
+switches and access points forward it on every port regardless of IGMP snooping. An
+administratively scoped group like `239.1.1.1` is the obvious choice and the wrong one: nothing
+on the wireless side has joined it, so a snooping AP prunes it, and the stimulus is then emitted
+flawlessly and never reaches the air. The node says so when it has sent packets and had nothing
+come back, which together with `--stimulus always` is the fastest way to tell the two apart.
+
 ## What nexmon does not give us
 
 A nexmon packet is 16 bytes of header and then interleaved int16 CSI. `src_mac` arrives for
@@ -140,6 +174,9 @@ If the service is up but no frames arrive, work down this list:
   firmware side is the problem, not the forwarder.
 - Is anything generating traffic? With `--probe-hz 0` and a quiet link there is genuinely
   nothing to measure.
+- `sudo tcpdump -i eth0 -n 'host 224.0.0.200'` on *another* machine on the same network — is the
+  stimulus leaving the Pi, and does it reach the rest of the segment? Silent on the Pi means the
+  emitter is misconfigured; visible on the Pi but not elsewhere means a switch is eating it.
 - `iw dev wlan0 get power_save` — power save lets the chip doze between beacons, which shows
   up as gaps. `csi-connected.sh` turns it off, but NetworkManager will turn it back on;
   `nmcli connection modify <name> wifi.powersave 2` makes that stick.
@@ -156,6 +193,9 @@ If the service is up but no frames arrive, work down this list:
 | `CSI_IFACE` | `wlan0` | |
 | `CSI_PROBE_HZ` | 100 | 0 to send nothing and ride the beacons |
 | `CSI_AP_MAC` | the associated BSSID | Only measure frames from this transmitter |
+| `CSI_STIMULUS` | `auto` | `always` to force it on, `off` to disable |
+| `CSI_STIMULUS_IFACE` | `eth0` | Wired interface the multicast leaves by |
+| `CSI_STIMULUS_HZ` | 50 | Rate while armed |
 
 `csi_node.py` takes the same settings as flags; run it with `--help`. It can be run by hand
 against a Pi that is already configured for collection, which is the fastest way to try
