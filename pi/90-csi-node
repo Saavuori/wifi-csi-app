@@ -1,0 +1,54 @@
+#!/bin/sh
+# Re-sync the CSI capture when the probe radio changes what it is associated to.
+#
+# The onboard radio captures one transmitter on one channel, both derived from the dongle's
+# association at service start. If the dongle later reconnects to a different mesh unit -- a
+# roam, an access point reboot, a channel change -- the capture keeps filtering for a radio that
+# is no longer talking to us and the node reports zero frames with nothing obviously wrong.
+# Restarting the service re-derives both.
+#
+# Only on a real change of BSSID: 'up' also fires on lease renewals, and restarting on each of
+# those would put a gap in the capture for no reason.
+# NetworkManager does not promise a login PATH to dispatcher scripts, and iw lives in sbin.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+IFACE="$1"
+ACTION="$2"
+
+CONF=/etc/default/csi-node
+
+# A wired node has no association to follow. Ethernet carries the network, the transmitter and
+# the channel were chosen by hand, and no NetworkManager event on any interface changes either --
+# so firing here could only restart the capture for no reason and put a gap in the data. The hook
+# stays installed rather than being skipped at install time, so that switching CSI_UPLINK back to
+# dongle needs an edit and a restart rather than a reinstall.
+[ "$(sed -n 's/^CSI_UPLINK=//p' "$CONF" 2>/dev/null)" = "wired" ] && exit 0
+
+# Read the probe interface out of the config rather than the environment. NetworkManager runs
+# dispatcher scripts with an environment of its own making and does not export ours, so
+# "${CSI_PROBE_IFACE:-wlan1}" would always be wlan1 here -- and on a machine where the dongle
+# came up as anything else this script would quietly never fire again.
+probe_iface=$(sed -n 's/^CSI_PROBE_IFACE=//p' "$CONF" 2>/dev/null)
+[ "$IFACE" = "${probe_iface:-wlan1}" ] || exit 0
+
+case "$ACTION" in
+    up|dhcp4-change) ;;
+    *) exit 0 ;;
+esac
+
+# A radio chosen by hand does not change because the dongle moved; leave it alone.
+[ "$(sed -n 's/^CSI_AP_FOLLOW=//p' "$CONF" 2>/dev/null)" = "manual" ] && exit 0
+
+now=$(iw dev "$IFACE" link 2>/dev/null | sed -n 's/^Connected to \([0-9a-fA-F:]\{17\}\).*/\1/p')
+[ -n "$now" ] || exit 0
+
+was=""
+[ -r /run/csi-node.env ] && was=$(sed -n 's/^CSI_AP_MAC=//p' /run/csi-node.env)
+
+# Compare case-insensitively; iw prints lowercase but a configured fallback may not.
+lower() { printf '%s' "$1" | tr 'A-F' 'a-f'; }
+[ "$(lower "$now")" = "$(lower "$was")" ] && exit 0
+
+logger -t csi-node "probe radio moved to $now (was ${was:-none}); restarting capture"
+systemctl restart csi-node
