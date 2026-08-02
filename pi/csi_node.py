@@ -959,9 +959,8 @@ def run(args: argparse.Namespace) -> int:
                 rate = node.frames / max(now - reported, 1e-9)
                 extra = ""
                 if stimulus is not None:
-                    extra = ", stimulus %s (%d sent)" % (
-                        "on" if node.narrowband else "off", stimulus.sent,
-                    )
+                    state = "on" if node.narrowband else "off"
+                    extra = f", stimulus {state} ({stimulus.sent} sent)"
                 log.info(
                     "%d frames (%.1f Hz), %d subcarriers, rssi %d dBm, %d link changes, "
                     "%d malformed, %d unstamped, %d off-class%s",
