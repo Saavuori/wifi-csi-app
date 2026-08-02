@@ -110,7 +110,8 @@ input[type="range"] {
 
 .node-select,
 select,
-input[type="text"] {
+input[type="text"],
+input[type="number"] {
   background: var(--panel-2);
   color: var(--text);
   border: 1px solid var(--line);
@@ -606,6 +607,123 @@ input[type="range"] {
   align-items: center;
   gap: 8px;
   font-size: 13px;
+}
+
+/* -- access points ----------------------------------------------------------------------- */
+
+.ap-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  flex-wrap: wrap;
+}
+
+.ap-measured {
+  border-color: rgba(76, 201, 240, 0.5);
+}
+
+.ap-main {
+  flex: 1;
+  min-width: 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ap-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.ap-meta {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.ap-badge {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
+.ap-badge-measured {
+  color: var(--accent);
+  border-color: rgba(76, 201, 240, 0.5);
+}
+
+.ap-badge-dongle {
+  color: var(--good);
+  border-color: rgba(6, 214, 160, 0.4);
+}
+
+/* Rough, and deliberately so: nmcli reports a quality percentage rather than power, and the bar
+   is only here to make "which of these is loud" readable without reading numbers. */
+.ap-signal {
+  width: 56px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line);
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+
+.ap-signal i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+.ap-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ap-summary-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+/* The right-hand value of a summary line: long enough to wrap (a yield reads as three figures),
+   and it wraps under itself rather than pushing the label off the panel. */
+.ap-summary-line .ap-meta {
+  text-align: right;
+  min-width: 0;
+}
+
+/* Explanations that change with the selected probe mode. A plain container, but the panel's own
+   gap does not reach children of a child, so the spacing has to be restated here. */
+.ap-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.hint-good {
+  color: var(--good);
+}
+
+.hint-bad {
+  color: var(--bad);
 }
 
 /* -- node health ------------------------------------------------------------------------- */

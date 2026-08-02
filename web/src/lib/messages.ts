@@ -197,3 +197,103 @@ export type WorkerIn =
   | { kind: "connect"; url: string }
   | { kind: "send"; message: unknown }
   | { kind: "select"; nodeId: number | null };
+
+/*
+ * Access points. These cross HTTP rather than the socket, because the server does not own this
+ * state: nmcli and the nexmon tooling live on the host, outside the container, and an agent
+ * there publishes the list and carries out selections through the shared data directory. The
+ * server relays; these are the shapes it relays.
+ */
+
+/** One radio the host can currently hear, as `nmcli dev wifi list` reports it. */
+export interface AccessPoint {
+  bssid: string;
+  ssid: string;
+  channel: number;
+  /** nmcli's SIGNAL: a 0–100 quality percentage, not dBm. Higher is stronger. */
+  signal: number;
+  /** True for the radio the probe dongle is associated to. At most one AP has it. */
+  in_use: boolean;
+}
+
+/**
+ * How traffic is provoked out of the measured radio.
+ *
+ * The extractor only produces CSI for HT/VHT frames, so what is being bought is a *unicast*
+ * transmission from that access point — to us, as an acknowledgement, or to one of its clients.
+ * Broadcasting at it yields nothing, because a group-addressed frame leaves at a legacy rate
+ * with no HT channel estimate to read out.
+ */
+export type ProbeMode = "broadcast" | "unicast" | "icmp";
+
+/**
+ * What the probe is doing, and — when the node has audited itself — what it is buying.
+ *
+ * Every field past `host`/`hz` is optional because an agent older than this UI publishes only
+ * those two, and an unaudited node publishes no rates at all. Absent means "not reported", which
+ * the UI has to say rather than dress up as a zero.
+ */
+export interface ApProbe {
+  /** Empty in broadcast mode, where the target is the interface's own broadcast address. */
+  host: string;
+  hz: number;
+  mode?: ProbeMode;
+  /** Capture rate attributable to the probes: total minus background. The number that matters. */
+  induced_hz?: number;
+  /** Frames per second arriving overall while probing. */
+  total_hz?: number;
+  /** What arrived with the probes off — the household's own traffic to that access point. */
+  background_hz?: number;
+}
+
+/** What the host agent publishes about the radios, and about which one is being measured. */
+export interface ApStatus {
+  /**
+   * Always sent. False when the host agent has published nothing at all — no agent running, or
+   * a data directory that is not actually shared — in which case the rest of this is empty.
+   */
+  available?: boolean;
+  updated_at?: number;
+  /** "auto" follows whatever the dongle associated to; "manual" holds the chosen BSSID. */
+  follow?: "auto" | "manual";
+  /**
+   * What carries the node's own traffic, which decides whether probing can work at all: a
+   * "dongle" is associated to some access point and can provoke its acknowledgements, while
+   * "wired" has no radio of its own and can only reach an access point through its clients.
+   * Absent from an agent too old to publish it.
+   */
+  uplink?: "dongle" | "wired";
+  /** Empty strings while the capture has not settled on anything yet. */
+  measured?: { bssid: string; chanspec: string };
+  probe?: ApProbe;
+  aps: AccessPoint[];
+}
+
+/**
+ * A request to measure a different radio, and optionally to change how traffic is provoked.
+ * `bssid` is ignored when the mode is "auto"; every probe field is optional, and omitting one
+ * leaves the host's current setting alone.
+ */
+export interface ApSelectRequest {
+  mode: "auto" | "manual";
+  bssid?: string;
+  probe_host?: string;
+  probe_mode?: ProbeMode;
+  probe_hz?: number;
+}
+
+/** The server's acknowledgement: the id to poll for the host agent's answer. */
+export interface ApSelectAccepted {
+  id: string;
+}
+
+/** A poll of a pending selection: still waiting, or the host agent's verdict. */
+export type ApSelectStatus =
+  | { pending: true }
+  | { pending?: false; id: string; ok: boolean; error?: string; finished_at?: number };
+
+/** What a completed selection is worth telling the user, whichever way it went. */
+export interface ApSelectOutcome {
+  ok: boolean;
+  error: string;
+}
