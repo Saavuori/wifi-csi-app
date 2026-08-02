@@ -41,11 +41,23 @@ interface Pending {
   replay: boolean;
 }
 
+// How long a frame-rate window is. Short enough that the readout notices the stream stopping,
+// long enough that a window holds tens of frames rather than a handful.
+const STATS_MS = 500;
+
+// Weight given to the newest window when updating the reported rate. At one window every 500 ms
+// this settles within a couple of seconds, which is the balance a readout wants: quick enough to
+// believe, steady enough to read.
+const RATE_ALPHA = 0.3;
+
 const pending = new Map<number, Pending>();
 let selectedNode: number | null = null;
-let framesThisSecond = 0;
+let framesThisWindow = 0;
 let dropped = 0;
-let lastStats = 0;
+// Measured with performance.now() rather than Date.now(): it is monotonic, so a clock step in
+// the middle of a window cannot produce a negative interval and a nonsense rate.
+let windowStart = performance.now();
+let smoothedHz = 0;
 
 function post(message: WorkerOut, transfer: Transferable[] = []) {
   scope.postMessage(message, transfer);
@@ -101,7 +113,7 @@ function ingest(buffer: ArrayBuffer) {
   if (frame === null) return;
   if (selectedNode !== null && frame.nodeId !== selectedNode) return;
 
-  framesThisSecond += 1;
+  framesThisWindow += 1;
 
   let batch = pending.get(frame.nodeId);
   if (batch === undefined || batch.nSub !== frame.nSub) {
@@ -164,11 +176,32 @@ function flush() {
     batch.agc.length = 0;
   }
 
-  const now = Date.now();
-  if (now - lastStats >= 1000) {
-    post({ kind: "stats", framesPerSecond: framesThisSecond, dropped });
-    framesThisSecond = 0;
-    lastStats = now;
+  // A rate, not a count. `flush` runs on a timer that a busy tab is free to run late, so a
+  // window is only ever *at least* STATS_MS long; dividing the frames in it by the nominal
+  // length rather than the length that actually elapsed reports a rate that is wrong by however
+  // late the timer was, which is most of why a steady node used to read as a number that
+  // wandered. The rest of the wander is quantization — whole frames landing either side of a
+  // boundary — and that is what the smoothing is for.
+  const now = performance.now();
+  const elapsed = now - windowStart;
+  if (elapsed >= STATS_MS) {
+    const instant = (framesThisWindow * 1000) / elapsed;
+    // Smoothing is for quantization, not for hiding events. Easing symmetrically would do both:
+    // a stream that stops still reads 29 fps four seconds later, because 0.7^n takes about
+    // thirteen windows to fall from 100 to under 1, and a two-second stall reads as a slow sag
+    // and a slow recovery. Neither is the node's behaviour, and a readout that keeps reporting
+    // frames after the frames stopped is worse than one that twitches.
+    //
+    // So ease upward and toward small changes, but follow a real collapse immediately. The
+    // threshold is what separates "a few frames landed the other side of a boundary" from
+    // "something happened": half the running value is far outside the former.
+    smoothedHz =
+      smoothedHz < 1 || instant < smoothedHz / 2
+        ? instant
+        : smoothedHz + RATE_ALPHA * (instant - smoothedHz);
+    post({ kind: "stats", framesPerSecond: Math.round(smoothedHz), dropped });
+    framesThisWindow = 0;
+    windowStart = now;
   }
 }
 

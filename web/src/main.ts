@@ -3,6 +3,7 @@ import "./styles.css";
 import { clear, el } from "./lib/dom";
 import type { NodeHealth, ReplayState, Session } from "./lib/messages";
 import { store } from "./lib/store";
+import { apsView } from "./views/aps";
 import { vitalsView } from "./views/breathing";
 import { healthView } from "./views/health";
 import { motionView } from "./views/motion";
@@ -20,6 +21,9 @@ const views: View[] = [
   vitalsView("heart"),
   placementView(),
   sessionsView(),
+  // Next to node health on purpose: both are about the instrument rather than the room, and
+  // "roaming" in health is answered by pinning a radio here.
+  apsView(),
   healthView(),
 ];
 

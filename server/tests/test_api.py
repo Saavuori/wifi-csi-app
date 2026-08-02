@@ -155,6 +155,168 @@ def test_recalibrate(client):
     assert client.post("/api/recalibrate", json={}).json()["ok"] is True
 
 
+# -- access points -----------------------------------------------------------------------
+
+
+PUBLISHED_APS = {
+    "updated_at": 1785600000,
+    "follow": "manual",
+    "uplink": "wired",
+    "measured": {"bssid": "7a:da:88:a2:e1:9f", "chanspec": "9/20"},
+    "probe": {
+        "host": "192.168.0.1",
+        "hz": 200,
+        "mode": "unicast",
+        "induced_hz": 78.0,
+        "total_hz": 102.0,
+        "background_hz": 24.0,
+    },
+    "aps": [
+        {"bssid": "7a:da:88:a2:e1:9f", "ssid": "mesh", "channel": 9, "signal": 45,
+         "in_use": False},
+        {"bssid": "aa:bb:cc:dd:ee:ff", "ssid": "mesh", "channel": 1, "signal": 90,
+         "in_use": True},
+    ],
+}
+
+
+def test_aps_without_a_host_agent(client):
+    """A node whose agent has not published yet is a normal state, not a failure: the picker
+    has to be able to say so rather than the API breaking."""
+    body = client.get("/api/aps").json()
+    assert body == {"available": False, "aps": []}
+
+
+def test_aps_survives_a_half_written_file(client, tmp_path):
+    (tmp_path / "aps.json").write_text('{"updated_at": 178560')
+    assert client.get("/api/aps").json()["available"] is False
+
+
+def test_aps_reports_what_the_host_published(client, tmp_path):
+    (tmp_path / "aps.json").write_text(json.dumps(PUBLISHED_APS))
+    body = client.get("/api/aps").json()
+
+    assert body["available"] is True
+    assert body["measured"]["chanspec"] == "9/20"
+    assert [ap["bssid"] for ap in body["aps"]] == [ap["bssid"] for ap in PUBLISHED_APS["aps"]]
+
+
+def test_aps_relays_the_uplink_and_the_measured_yield(client, tmp_path):
+    """How traffic is being provoked, and what that is buying, are the agent's to report and the
+    server's only to carry: it cannot see the interfaces or count the frames itself."""
+    (tmp_path / "aps.json").write_text(json.dumps(PUBLISHED_APS))
+    body = client.get("/api/aps").json()
+
+    assert body["uplink"] == "wired"
+    assert body["probe"]["mode"] == "unicast"
+    assert body["probe"]["induced_hz"] == 78.0
+    assert body["probe"]["background_hz"] == 24.0
+
+
+def test_aps_from_an_older_agent_keeps_working(client, tmp_path):
+    """An agent that predates the probe-mode fields publishes neither them nor an uplink. That
+    has to relay as an absence — the UI says "not reported" — rather than as a failure or an
+    invented default."""
+    published = {**PUBLISHED_APS, "probe": {"host": "192.168.0.1", "hz": 200}}
+    del published["uplink"]
+    (tmp_path / "aps.json").write_text(json.dumps(published))
+    body = client.get("/api/aps").json()
+
+    assert body["available"] is True
+    assert "uplink" not in body
+    assert "mode" not in body["probe"]
+    assert "induced_hz" not in body["probe"]
+
+
+def test_select_writes_a_request_the_agent_can_read(client, tmp_path):
+    posted = client.post(
+        "/api/aps/select",
+        json={"mode": "manual", "bssid": "AA:BB:CC:DD:EE:FF", "probe_host": "192.168.0.1"},
+    ).json()
+
+    request = json.loads((tmp_path / "ap-select.request.json").read_text())
+    assert request["id"] == posted["id"]
+    assert request["mode"] == "manual"
+    assert request["bssid"] == "aa:bb:cc:dd:ee:ff"
+    assert request["probe_host"] == "192.168.0.1"
+
+
+def test_select_auto_needs_no_bssid(client, tmp_path):
+    assert client.post("/api/aps/select", json={"mode": "auto"}).status_code == 200
+    assert json.loads((tmp_path / "ap-select.request.json").read_text())["mode"] == "auto"
+
+
+def test_select_carries_the_probe_mode_and_rate(client, tmp_path):
+    client.post(
+        "/api/aps/select",
+        json={"mode": "auto", "probe_mode": "Unicast", "probe_hz": 250},
+    )
+    request = json.loads((tmp_path / "ap-select.request.json").read_text())
+
+    assert request["probe_mode"] == "unicast"
+    assert request["probe_hz"] == 250.0
+
+
+def test_select_leaves_the_probe_alone_when_it_is_not_asked_about(client, tmp_path):
+    """Moving the measurement must not silently reset how it is being provoked, so an omitted
+    field has to stay distinguishable from a chosen one all the way to the host agent."""
+    client.post("/api/aps/select", json={"mode": "auto"})
+    request = json.loads((tmp_path / "ap-select.request.json").read_text())
+
+    assert request["probe_mode"] == ""
+    assert request["probe_hz"] is None
+
+
+def test_select_accepts_a_zero_probe_rate(client, tmp_path):
+    """0 Hz is a real setting — measure only what the network already carries — and must not be
+    confused with "no opinion"."""
+    client.post("/api/aps/select", json={"mode": "auto", "probe_hz": 0})
+    assert json.loads((tmp_path / "ap-select.request.json").read_text())["probe_hz"] == 0.0
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"mode": "sideways", "bssid": "aa:bb:cc:dd:ee:ff"},
+        {"mode": "manual"},
+        {"mode": "manual", "bssid": "not-a-mac"},
+        {"mode": "manual", "bssid": "aa:bb:cc:dd:ee:ff", "probe_host": "--auto"},
+        {"mode": "auto", "probe_mode": "shout"},
+        {"mode": "auto", "probe_hz": -1},
+        {"mode": "auto", "probe_hz": 100000},
+        {"mode": "auto", "probe_hz": "fast"},
+        # JSON has no NaN or infinity literal, so the way one reaches the host is as a string
+        # that float() happily accepts. Both fail the range check rather than the parse.
+        {"mode": "auto", "probe_hz": "nan"},
+        {"mode": "auto", "probe_hz": "inf"},
+        # float(True) is 1.0, so a JSON true would otherwise arrive as a 1 Hz probe.
+        {"mode": "auto", "probe_hz": True},
+    ],
+)
+def test_select_rejects_bad_input(client, tmp_path, body):
+    assert client.post("/api/aps/select", json=body).status_code == 400
+    assert not (tmp_path / "ap-select.request.json").exists()
+
+
+def test_select_result_is_pending_until_the_agent_answers(client, tmp_path):
+    request_id = client.post("/api/aps/select", json={"mode": "auto"}).json()["id"]
+    assert client.get(f"/api/aps/select/{request_id}").json() == {"pending": True}
+
+    # A leftover from an earlier selection must not be read as an answer to this one: the host
+    # keeps a single result slot, so the id is the only thing that ties one to the other.
+    result = tmp_path / "ap-select.result.json"
+    result.write_text(json.dumps({"id": "an-older-one", "ok": True, "finished_at": 1785600000}))
+    assert client.get(f"/api/aps/select/{request_id}").json() == {"pending": True}
+
+    result.write_text(
+        json.dumps({"id": request_id, "ok": False, "error": "no such AP",
+                    "finished_at": 1785600001})
+    )
+    answered = client.get(f"/api/aps/select/{request_id}").json()
+    assert answered["ok"] is False
+    assert answered["error"] == "no such AP"
+
+
 # -- websocket ---------------------------------------------------------------------------
 
 
