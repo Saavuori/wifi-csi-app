@@ -670,7 +670,7 @@ def run(args: argparse.Namespace) -> int:
                 log.info(
                     "%d frames (%.1f Hz), %d subcarriers, rssi %d dBm, %d link changes, "
                     "%d malformed, %d unstamped",
-                    node.frames, rate, pkt.n_sub, node.rssi, node.link_changes, bad, unstamped,
+                    node.frames, rate, n_sub, node.rssi, node.link_changes, bad, unstamped,
                 )
                 node.frames = 0
                 reported = now
