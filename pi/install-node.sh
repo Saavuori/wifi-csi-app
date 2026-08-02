@@ -17,6 +17,9 @@
 #     --iface NAME       wireless interface (default wlan0)
 #     --ap MAC           only measure frames from this transmitter (default: the associated AP)
 #     --probe-hz N       ping rate that generates the traffic to measure (default 100)
+#     --stimulus MODE    Ethernet multicast fallback: auto, always or off (default auto)
+#     --stimulus-iface NAME  wired interface it emits on (default eth0)
+#     --stimulus-hz N    its rate while armed (default 50)
 #     --repo URL         nexmon_csi fork to build (default: Saavuori/nexmon_csi)
 #     --branch NAME      branch of that fork
 #     --nexmon-repo URL  base nexmon tree to build it against (default: seemoo-lab/nexmon)
@@ -62,6 +65,9 @@ NODE_ID="${CSI_NODE_ID:-20}"
 IFACE="${CSI_IFACE:-wlan0}"
 AP_MAC=""
 PROBE_HZ="${CSI_PROBE_HZ:-100}"
+STIMULUS="${CSI_STIMULUS:-auto}"
+STIMULUS_IFACE="${CSI_STIMULUS_IFACE:-eth0}"
+STIMULUS_HZ="${CSI_STIMULUS_HZ:-50}"
 SKIP_BUILD=0
 UNINSTALL=0
 ASSUME_YES=0
@@ -100,6 +106,9 @@ while [ $# -gt 0 ]; do
         --iface)      IFACE="${2:?--iface needs a name}"; shift ;;
         --ap)         AP_MAC="${2:?--ap needs a MAC}"; shift ;;
         --probe-hz)   PROBE_HZ="${2:?--probe-hz needs a number}"; shift ;;
+        --stimulus)   STIMULUS="${2:?--stimulus needs auto, always or off}"; shift ;;
+        --stimulus-iface) STIMULUS_IFACE="${2:?--stimulus-iface needs a name}"; shift ;;
+        --stimulus-hz)    STIMULUS_HZ="${2:?--stimulus-hz needs a number}"; shift ;;
         --repo)       CSI_REPO="${2:?--repo needs a URL}"; shift ;;
         --branch)     CSI_BRANCH="${2:?--branch needs a name}"; shift ;;
         --nexmon-repo) NEXMON_REPO="${2:?--nexmon-repo needs a URL}"; shift ;;
@@ -579,6 +588,20 @@ install_service() {
         ok "measuring frames from $AP_MAC"
     fi
 
+    case "$STIMULUS" in
+        auto|always|off) ;;
+        *) die "--stimulus must be auto, always or off (got '$STIMULUS')" ;;
+    esac
+    if [ "$STIMULUS" != off ] && [ ! -e "/sys/class/net/$STIMULUS_IFACE" ]; then
+        # Not fatal — the wire may be plugged in later — but worth saying now, because the
+        # failure is silent: the node emits nothing and simply measures whatever the household
+        # happens to generate, which is the exact problem the stimulus exists to solve.
+        warn "no interface '$STIMULUS_IFACE', so the Ethernet stimulus has nowhere to go.
+    Pass --stimulus-iface <name>, or --stimulus off if this node has no wired link."
+    elif [ "$STIMULUS" != off ]; then
+        ok "stimulus on $STIMULUS_IFACE at $STIMULUS_HZ Hz ($STIMULUS)"
+    fi
+
     if [ -z "$SERVER" ]; then
         SERVER="127.0.0.1"
     fi
@@ -591,6 +614,9 @@ CSI_NODE_ID=$NODE_ID
 CSI_IFACE=$IFACE
 CSI_PROBE_HZ=$PROBE_HZ
 CSI_AP_MAC=$AP_MAC
+CSI_STIMULUS=$STIMULUS
+CSI_STIMULUS_IFACE=$STIMULUS_IFACE
+CSI_STIMULUS_HZ=$STIMULUS_HZ
 CSI_CONNECT_SH=$connect
 EOF
     chmod 0644 "$ENV_FILE"

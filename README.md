@@ -84,8 +84,10 @@ One command, no flags, no questions about what you want: it builds a Pi that mea
 room. Both halves:
 
 - **The capture, on the host.** Patches the BCM43455 with nexmon_csi and runs `csi-node.service`,
-  measuring against the access point this Pi is already associated with and forwarding to the
-  server on `127.0.0.1`. It reports as **node 20**.
+  listening on the access point's channel and forwarding to the server on `127.0.0.1`. It reports
+  as **node 20**. The radio ends up in monitor mode and the Pi wants Ethernet — both for its own
+  reachability and because that is where it provokes traffic from; see
+  [`pi/README.md`](pi/README.md).
 - **The server, in Docker.** Installs Docker if it is missing, raises `net.core.rmem_max`, pulls
   the arm64 image and starts it: UDP ingest, recorder, replayer, the DSP, and the web app —
   waterfall, subcarriers, motion, breathing, heart rate, placement, sessions and node health. Open
@@ -117,13 +119,17 @@ both worth knowing if you deploy by hand:
 
 ### How many subcarriers you get
 
-The count follows the channel width the access point uses — 256 at 80 MHz, 128 at 40, 64 at 20. A
-Pi associated to a 2.4 GHz network gives 64. If you want the full 256, put `wlan0` on a 5 GHz
-network running an 80 MHz channel and check what you actually got:
+The count follows the width of the frames being measured — 256 at 80 MHz, 128 at 40, 64 at 20. A
+Pi watching a 2.4 GHz network gives 64. If you want the full 256, point it at a 5 GHz network
+running an 80 MHz channel and check what you actually got:
 
 ```sh
-iw dev wlan0 link
+iw dev wlan0 info
 ```
+
+Two things also come back at 20 MHz whatever the channel width, because broadcast and multicast
+go out at the basic rate: beacons, and the node's own Ethernet stimulus. Those are trimmed to
+their real 64 subcarriers rather than padded out with noise — see [`pi/README.md`](pi/README.md).
 
 ## Running the server somewhere other than a Pi
 
@@ -261,10 +267,13 @@ setting up the server, or point a Pi at a server elsewhere with
 sudo pi/install-node.sh --server 192.168.1.10
 ```
 
-The fork matters. Upstream nexmon_csi gives up the Wi-Fi connection — it kills `wpa_supplicant`,
-switches to monitor mode and retunes the chip — which is fatal on a Pi that is meant to be both
-the sensor and the thing forwarding frames. [Ours](https://github.com/Saavuori/nexmon_csi) keeps
-the association up and configures the extractor around the channel it is already on.
+The fork matters, though not for the reason it was written. It exists to keep the Wi-Fi
+connection that upstream's procedure gives up — but with the CSI firmware loaded, an associated
+BCM43455 receives no unicast data at all, so there is no connection left to keep and the Pi runs
+in monitor mode regardless. What [the fork](https://github.com/Saavuori/nexmon_csi) still buys is
+a build that targets the one firmware version the CSI patch supports and tooling that configures
+the extractor without tearing the interface down. The measurements and the root cause are in
+[`pi/README.md`](pi/README.md); the practical consequence is that a Pi node wants Ethernet.
 
 What you give up against an ESP32: no radio-level timestamp (the kernel's `SO_TIMESTAMPNS`
 instead), RSSI read from the driver once a second rather than per frame, and amplitude scaled per
