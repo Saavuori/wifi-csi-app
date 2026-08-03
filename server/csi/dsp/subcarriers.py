@@ -62,8 +62,8 @@ def index_to_k(n_sub: int) -> np.ndarray:
     return np.where(i < n_sub // 2, i, i - n_sub)
 
 
-@lru_cache(maxsize=8)
-def _mask(n_sub: int, drop_pilots: bool) -> np.ndarray:
+@lru_cache(maxsize=16)
+def _mask(n_sub: int, drop_pilots: bool, drop_dc_adjacent: bool = False) -> np.ndarray:
     layout = LAYOUTS.get(n_sub)
     k = index_to_k(n_sub)
 
@@ -79,18 +79,30 @@ def _mask(n_sub: int, drop_pilots: bool) -> np.ndarray:
         if drop_pilots:
             mask &= ~np.isin(k, layout.pilots)
 
+    if drop_dc_adjacent:
+        mask &= np.abs(k) != 1
+
     mask.flags.writeable = False
     return mask
 
 
-def valid_mask(n_sub: int, *, drop_pilots: bool = True) -> np.ndarray:
+def valid_mask(
+    n_sub: int, *, drop_pilots: bool = True, drop_dc_adjacent: bool = False
+) -> np.ndarray:
     """Boolean mask of usable subcarriers, shape (n_sub,). Read-only; do not mutate.
 
     Pilots are dropped by default. They *are* transmitted, so their amplitude is real, but they
     are modulated by a known pseudo-random sign sequence that changes per OFDM symbol; leaving
     them in adds a deterministic flutter that the variance detector reads as motion.
+
+    `drop_dc_adjacent` removes k = +/-1. The standard says those carry data and for the ESP32
+    they do, which is why this is off by default. On the Pi's BCM43455 they carry the DC offset
+    leaking sideways instead: measured over 150 consecutive frames, index 1 ran 8.2x the median
+    amplitude in every single one. That matters beyond looking wrong in the waterfall, because
+    subcarrier selection ranks bins by variance to decide where to measure breathing — so the
+    one bin carrying no signal is a strong candidate to be chosen first.
     """
-    return _mask(n_sub, drop_pilots)
+    return _mask(n_sub, drop_pilots, drop_dc_adjacent)
 
 
 def layout_name(n_sub: int) -> str:
@@ -98,9 +110,11 @@ def layout_name(n_sub: int) -> str:
     return layout.name if layout else f"unknown-{n_sub}"
 
 
-def describe(n_sub: int, *, drop_pilots: bool = True) -> dict:
+def describe(
+    n_sub: int, *, drop_pilots: bool = True, drop_dc_adjacent: bool = False
+) -> dict:
     """Layout summary for the UI, so the waterfall can label its Y axis honestly."""
-    mask = valid_mask(n_sub, drop_pilots=drop_pilots)
+    mask = valid_mask(n_sub, drop_pilots=drop_pilots, drop_dc_adjacent=drop_dc_adjacent)
     k = index_to_k(n_sub)
     return {
         "n_sub": n_sub,

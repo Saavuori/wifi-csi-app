@@ -215,3 +215,35 @@ def test_norm_mode_none_leaves_amplitude_untouched():
     config = PreprocessConfig(norm_mode="none", hampel_enabled=False)
     processed = Preprocessor(config).process(frame)
     np.testing.assert_allclose(processed.amp[processed.mask], frame.amplitude()[processed.mask])
+
+
+# -- DC-adjacent subcarriers (the BCM43455's leakage) --------------------------------------
+
+
+def test_dc_adjacent_kept_by_default():
+    """The standard says k = +/-1 carry data, and on an ESP32 they do."""
+    mask = valid_mask(64, drop_pilots=False)
+    assert mask[1] and mask[63]
+
+
+def test_dc_adjacent_can_be_dropped():
+    mask = valid_mask(64, drop_pilots=False, drop_dc_adjacent=True)
+    assert not mask[1] and not mask[63]
+    # k = 0 was already out; k = +/-2 must survive.
+    assert mask[2] and mask[62]
+
+
+@pytest.mark.parametrize("n_sub", [64, 128, 256])
+def test_dropping_dc_adjacent_removes_exactly_two_bins(n_sub):
+    kept = valid_mask(n_sub, drop_pilots=True).sum()
+    dropped = valid_mask(n_sub, drop_pilots=True, drop_dc_adjacent=True).sum()
+    # 128 and 256 already exclude |k| = 1 as guard, so only HT20 loses anything.
+    assert kept - dropped == (2 if n_sub == 64 else 0)
+
+
+def test_the_two_flags_are_cached_independently():
+    """lru_cache keyed on one argument would hand back the wrong mask for the other."""
+    a = valid_mask(64, drop_pilots=True, drop_dc_adjacent=False)
+    b = valid_mask(64, drop_pilots=True, drop_dc_adjacent=True)
+    assert a.sum() != b.sum()
+    assert valid_mask(64, drop_pilots=True, drop_dc_adjacent=False).sum() == a.sum()

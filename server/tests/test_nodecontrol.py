@@ -134,3 +134,34 @@ def test_wifi_includes_configured_but_silent_nodes(client):
     node = next(n for n in body["nodes"] if n["node_id"] == 77)
     assert node["desired"]["channel"] == "36/80"
     assert node["transmitters"] == []
+
+
+# -- node health reports an absent noise floor honestly ------------------------------------
+
+
+def _frame(rssi: int, noise: int):
+    import numpy as np
+
+    from csi.protocol import Frame
+
+    return Frame(
+        node_id=1, seq=0, timestamp=0, rssi=rssi, noise_floor=noise, channel=6,
+        sec_channel=0, n_sub=64, data=np.zeros(128, dtype=np.int8),
+    )
+
+
+def test_snr_is_none_when_the_driver_reports_no_noise_floor():
+    """brcmfmac leaves the column empty; the node normalizes that to 0. rssi - 0 is not an SNR."""
+    from csi.nodes import NodeHealth
+
+    health = NodeHealth(node_id=1)
+    health.observe(_frame(rssi=-49, noise=0), now=1000.0)
+    assert health.as_dict()["snr_db"] is None
+
+
+def test_snr_is_reported_when_the_noise_floor_is_real():
+    from csi.nodes import NodeHealth
+
+    health = NodeHealth(node_id=1)
+    health.observe(_frame(rssi=-49, noise=-92), now=1000.0)
+    assert health.as_dict()["snr_db"] == 43

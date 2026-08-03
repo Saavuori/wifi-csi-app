@@ -69,7 +69,10 @@ export function healthView(): View {
             metric("gaps", node.gaps.toLocaleString()),
             metric("frames", node.frames.toLocaleString()),
             metric("RSSI", `${node.rssi} dBm`),
-            metric("SNR", `${node.snr_db} dB`),
+            // A dash, not a number, when the driver reports no noise floor. Showing rssi - 0
+            // gave a confident "-49 dB" on a healthy link, which is the kind of figure someone
+            // tunes a threshold against.
+            metric("SNR", node.snr_db === null ? "—" : `${node.snr_db} dB`),
             metric("channel", String(node.channel)),
             metric("subcarriers", String(node.n_sub)),
             metric("uptime", formatDuration(node.uptime_s)),
@@ -145,6 +148,15 @@ export function healthView(): View {
         value: config.preprocess.drop_pilots,
         onChange: (value) => store.patchConfig({ preprocess: { drop_pilots: value } }),
         hint: "Pilots are modulated by a known sign sequence, which reads as flutter",
+      }),
+      toggle({
+        label: "Drop DC-adjacent subcarriers",
+        value: config.preprocess.drop_dc_adjacent,
+        onChange: (value) => store.patchConfig({ preprocess: { drop_dc_adjacent: value } }),
+        hint:
+          "Turn on for a Raspberry Pi node. The BCM43455 leaks its DC offset into k = ±1 — " +
+          "measured at 8x the median amplitude in every frame — and subcarrier selection " +
+          "ranks by variance, so the bin carrying no signal is a strong candidate to be picked.",
       }),
       slider({
         label: "AGC step threshold",

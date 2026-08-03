@@ -55,7 +55,82 @@ export const ICONS = {
   placement: '<circle cx="12" cy="12" r="3.6"/><path d="M12 2.8v3.2M12 18v3.2M2.8 12H6M18 12h3.2"/>',
   more: '<circle cx="5.5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="18.5" cy="12" r="1.4"/>',
   sliders: '<path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>',
+  expand: '<path d="M9 4H4v5M15 4h5v5M15 20h5v-5M9 20H4v-5"/>',
+  collapse: '<path d="M4 9h5V4M20 9h-5V4M20 15h-5v5M4 15h5v5"/>',
 } as const;
+
+/* -- fullscreen ---------------------------------------------------------------------------- */
+
+/**
+ * Make one element fill the screen, and tell the caller when that changes.
+ *
+ * Two mechanisms, because one is not enough. The Fullscreen API is the right thing where it
+ * exists — it takes over the whole display, including the browser chrome. On iOS it does not
+ * exist for anything but a `<video>`, and a phone is precisely where a waterfall most wants the
+ * extra pixels, so the fallback pins the element over the viewport with CSS instead. Both paths
+ * set the same class, so the styling is written once.
+ *
+ * `onChange` fires for either path, including when the user leaves by pressing Escape or by a
+ * gesture we never see — which callers need, because a canvas has to be resized and redrawn.
+ */
+export function fullscreen(target: HTMLElement, onChange: (active: boolean) => void) {
+  const supported = typeof target.requestFullscreen === "function";
+  let fallbackActive = false;
+
+  // Either path counts. Selecting on `supported` instead looks equivalent and is not: the API
+  // can exist and still refuse the request — an untrusted gesture, a permissions policy, an
+  // iframe without `allow="fullscreen"` — and we then use the CSS path anyway. Reading only
+  // `document.fullscreenElement` in that case reports "not fullscreen" a frame after we turned
+  // it on, so the class is removed again and the button does nothing at all.
+  const active = () => document.fullscreenElement === target || fallbackActive;
+
+  const sync = () => {
+    const on = active();
+    target.classList.toggle("is-fullscreen", on);
+    document.documentElement.classList.toggle("has-fullscreen", on);
+    onChange(on);
+  };
+
+  if (supported) document.addEventListener("fullscreenchange", sync);
+
+  // Escape is handled by the browser for the real thing; the fallback has to do it itself.
+  const onKey = (event: KeyboardEvent) => {
+    if (event.key === "Escape" && fallbackActive) {
+      event.preventDefault();
+      fallbackActive = false;
+      sync();
+    }
+  };
+  document.addEventListener("keydown", onKey);
+
+  return {
+    active,
+    async toggle() {
+      if (supported) {
+        // A rejected request is not an error worth surfacing: it means the gesture was not
+        // trusted or the element cannot go fullscreen, and the view behind it is still fine.
+        try {
+          if (document.fullscreenElement === target) await document.exitFullscreen();
+          else await target.requestFullscreen({ navigationUI: "hide" });
+          return;
+        } catch {
+          // Fall through to the CSS path rather than leaving the button dead.
+        }
+      }
+      fallbackActive = !fallbackActive;
+      sync();
+    },
+    dispose() {
+      if (supported) document.removeEventListener("fullscreenchange", sync);
+      document.removeEventListener("keydown", onKey);
+      if (fallbackActive) {
+        fallbackActive = false;
+        target.classList.remove("is-fullscreen");
+        document.documentElement.classList.remove("has-fullscreen");
+      }
+    },
+  };
+}
 
 /* -- bottom sheets ------------------------------------------------------------------------ */
 

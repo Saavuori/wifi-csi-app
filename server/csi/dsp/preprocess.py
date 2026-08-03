@@ -35,6 +35,10 @@ NOMINAL_RMS = 40.0
 class PreprocessConfig:
     norm_mode: NormMode = "hybrid"
     drop_pilots: bool = True
+    # Drop k = +/-1. Off by default because the standard says those carry data and on an ESP32
+    # they do; on the Pi's BCM43455 they carry DC leakage at ~8x the median amplitude. See
+    # valid_mask().
+    drop_dc_adjacent: bool = False
 
     hampel_enabled: bool = True
     hampel_window: int = 5  # half-width, in subcarriers
@@ -93,7 +97,11 @@ class Preprocessor:
 
     def process(self, frame: Frame) -> Processed:
         cfg = self.config
-        mask = valid_mask(frame.n_sub, drop_pilots=cfg.drop_pilots)
+        mask = valid_mask(
+            frame.n_sub,
+            drop_pilots=cfg.drop_pilots,
+            drop_dc_adjacent=cfg.drop_dc_adjacent,
+        )
         amp = frame.amplitude()
 
         if frame.n_sub != self._prev_n_sub:

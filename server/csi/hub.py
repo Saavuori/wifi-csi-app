@@ -49,6 +49,7 @@ from .recorder import Recorder
 from .replay import Replayer
 from .ring import FrameRing, History, Window
 from .sessions import SessionStore
+from .version import build_info
 
 log = logging.getLogger("csi.hub")
 
@@ -645,8 +646,19 @@ class Hub:
         n_sub = next((s.ring.n_sub for s in self.nodes.values() if s.ring), 0)
         return {
             "uptime_s": round(time.time() - self.started_at, 1),
+            # In the snapshot as well as on /api/version: the browser gets it with the state it
+            # already fetches, so "which build am I looking at" never costs a second request.
+            "build": build_info(),
             "nodes": self.node_report(),
-            "layout": describe(n_sub) if n_sub else None,
+            "layout": (
+                describe(
+                    n_sub,
+                    drop_pilots=self.settings.preprocess.drop_pilots,
+                    drop_dc_adjacent=self.settings.preprocess.drop_dc_adjacent,
+                )
+                if n_sub
+                else None
+            ),
             "recording": self.recorder.session.as_dict() if self.recorder else None,
             "replay": self.replayer.state() if self.replayer else None,
             "counters": {
@@ -665,6 +677,7 @@ class Hub:
             "preprocess": {
                 "norm_mode": s.preprocess.norm_mode,
                 "drop_pilots": s.preprocess.drop_pilots,
+                "drop_dc_adjacent": s.preprocess.drop_dc_adjacent,
                 "hampel_enabled": s.preprocess.hampel_enabled,
                 "agc_step_db": s.preprocess.agc_step_db,
                 "agc_uniformity": s.preprocess.agc_uniformity,
@@ -712,7 +725,7 @@ class Hub:
         pre = _section(patch, "preprocess")
         if pre.get("norm_mode") in ("hybrid", "rssi", "rms", "none"):
             s.preprocess.norm_mode = pre["norm_mode"]
-        for key in ("drop_pilots", "hampel_enabled"):
+        for key in ("drop_pilots", "hampel_enabled", "drop_dc_adjacent"):
             if key in pre:
                 setattr(s.preprocess, key, bool(pre[key]))
         for key, lo, hi in (("agc_step_db", 0.0, 60.0), ("agc_uniformity", 0.0, 10.0)):

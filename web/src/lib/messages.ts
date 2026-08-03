@@ -19,7 +19,8 @@ export interface NodeHealth {
   bad_packets: number;
   rssi: number;
   noise_floor: number;
-  snr_db: number;
+  /** null when the driver reports no noise floor — brcmfmac on the Pi does not. */
+  snr_db: number | null;
   channel: number;
   n_sub: number;
   uptime_s: number;
@@ -110,6 +111,7 @@ export interface ServerConfig {
   preprocess: {
     norm_mode: "hybrid" | "rssi" | "rms" | "none";
     drop_pilots: boolean;
+    drop_dc_adjacent: boolean;
     hampel_enabled: boolean;
     agc_step_db: number;
     agc_uniformity: number;
@@ -195,8 +197,16 @@ export interface Layout {
   k: number[];
 }
 
+/** Which build the server is running. `commit` and `built_at` are empty for a dev build. */
+export interface BuildInfo {
+  version: string;
+  commit: string;
+  built_at: string;
+}
+
 export interface Snapshot {
   uptime_s: number;
+  build: BuildInfo;
   nodes: NodeHealth[];
   layout: Layout | null;
   recording: Session | null;

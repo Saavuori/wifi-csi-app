@@ -34,6 +34,21 @@ RUN pip install --no-cache-dir ./server
 
 COPY --from=web /build/dist ./web/dist
 
+# Build identity, passed in by CI and surfaced on /api/version and in the UI. Declared after
+# the pip install so that changing a commit SHA does not invalidate the dependency layer —
+# these move on every build and the wheels do not.
+ARG CSI_VERSION=dev
+ARG CSI_COMMIT=""
+ARG CSI_BUILT_AT=""
+ENV CSI_VERSION=${CSI_VERSION} \
+    CSI_COMMIT=${CSI_COMMIT} \
+    CSI_BUILT_AT=${CSI_BUILT_AT}
+
+# Standard annotations, so `docker inspect` and the GHCR listing agree with /api/version.
+LABEL org.opencontainers.image.version="${CSI_VERSION}" \
+      org.opencontainers.image.revision="${CSI_COMMIT}" \
+      org.opencontainers.image.created="${CSI_BUILT_AT}"
+
 ENV CSI_WEB_DIR=/app/web/dist \
     CSI_DATA_DIR=/data \
     CSI_UDP_HOST=0.0.0.0 \
