@@ -161,6 +161,33 @@ class NexmonPacket:
         return int(self.csi.size)
 
 
+# Widths a capture can legitimately have. Anything one sample longer is the firmware quirk
+# handled by `_trim_overlong`.
+_VALID_WIDTHS = (64, 128, 256)
+
+
+def _trim_overlong(csi: np.ndarray) -> np.ndarray:
+    """Drop the trailing sample from a frame that is one longer than a real width.
+
+    About 1% of frames from this bcm43455 build arrive as 1046 bytes rather than 1042 — 257
+    subcarriers instead of 256. The extra sample is at the end, not the start: correlating the
+    mean magnitude profile of the odd frames against the 256-wide population gives 0.997 when
+    the last sample is dropped and 0.236 when the first is, so the leading 256 are the real
+    measurement and the tail is junk.
+
+    Worth handling rather than dropping the frame, because the width is part of the link key.
+    Left alone, every one of these flipped the key 256 -> 257 -> 256 and bumped the link epoch
+    twice, and the server answers an epoch change by discarding that node's history. At 1% of
+    41 Hz that was a reset every couple of seconds, which is why presence and breathing never
+    accumulated a usable window while the waterfall looked perfectly healthy.
+    """
+    if csi.size in _VALID_WIDTHS:
+        return csi
+    if csi.size - 1 in _VALID_WIDTHS:
+        return csi[:-1]
+    return csi
+
+
 def parse_nexmon(payload: bytes) -> NexmonPacket | None:
     """Decode one nexmon CSI payload, or None if it is not one.
 
@@ -186,6 +213,7 @@ def parse_nexmon(payload: bytes) -> NexmonPacket | None:
     # nexmon interleaves (real, imag). The uplink wire is (imag, real) because that is the
     # order esp_wifi uses; the swap happens once, here.
     csi = raw[0::2].astype(np.float32) + 1j * raw[1::2].astype(np.float32)
+    csi = _trim_overlong(csi)
 
     return NexmonPacket(
         src_mac=src_mac,
@@ -254,6 +282,38 @@ NARROWBAND_BLOCK = 64
 # good one. Both are quiet failures, which is why it is a named constant and a flag.
 NARROWBAND_MARGIN_DB = 12.0
 
+# Active subcarrier ranges, |k| inclusive, mirroring LAYOUTS in server/csi/dsp/subcarriers.py.
+# Everything outside them is DC or guard band: never transmitted, so the FFT bin holds whatever
+# was left in it. On a bcm43455 that residue is not small — measured against live captures, the
+# guard bins run to 34640 while the largest real data subcarrier in the same frames was 2074.
+#
+# Any statistic taken over a whole frame is therefore a statistic about the guard bands. Both
+# callers below learned this the hard way: `quantize` was scaling every frame to a DC bin
+# seventeen times larger than the signal, which quantized the actual measurement to zero, and
+# `occupied_span` was comparing block powers dominated by the same residue and so picked the
+# wrong block and failed the ratio test.
+_ACTIVE: dict[int, tuple[int, int]] = {64: (1, 26), 128: (2, 58), 256: (2, 122)}
+
+
+def data_bins(n_sub: int) -> np.ndarray:
+    """Boolean mask of the bins that carry data or pilots, in this file's index convention.
+
+    Index i maps to subcarrier k as k = i for i < n_sub/2, else i - n_sub — the layout the
+    server assumes and the one nexmon delivers, so index 0 is DC.
+    """
+    i = np.arange(n_sub)
+    k = np.where(i < n_sub // 2, i, i - n_sub)
+    lo, hi = _ACTIVE.get(n_sub, (1, max(1, n_sub // 2 - max(1, n_sub // 16))))
+    return (np.abs(k) >= lo) & (np.abs(k) <= hi)
+
+
+def _masked_mean_power(block: np.ndarray, mask: np.ndarray) -> float:
+    """Mean power of one block over its data bins, or 0.0 if the block is all guard."""
+    kept = block[mask]
+    if kept.size == 0:
+        return 0.0
+    return float((np.abs(kept) ** 2).mean())
+
 
 def occupied_span(csi: np.ndarray, margin_db: float = NARROWBAND_MARGIN_DB) -> slice | None:
     """The 20 MHz block a narrowband frame occupies, or None if the frame fills the capture.
@@ -272,7 +332,19 @@ def occupied_span(csi: np.ndarray, margin_db: float = NARROWBAND_MARGIN_DB) -> s
     if blocks < 2 or csi.size % NARROWBAND_BLOCK:
         return None
 
-    power = (np.abs(csi) ** 2).reshape(blocks, NARROWBAND_BLOCK).mean(axis=1)
+    # Guards excluded before the blocks are averaged. With them in, a live capture measured
+    # [1.9e7, 2.4e6, 5.9e6, 2.1e5] and named Q0 the loudest at 4.7 dB — below the margin, so
+    # nothing was ever trimmed. The same frames with only data bins counted are
+    # [1.3e5, 6.7e4, 2.3e6, 2.1e5]: Q2, by 10.4 dB. The old reading was not marginal, it was
+    # the wrong block entirely.
+    mask = data_bins(csi.size)
+    power = np.array(
+        [
+            _masked_mean_power(csi[b * NARROWBAND_BLOCK : (b + 1) * NARROWBAND_BLOCK],
+                               mask[b * NARROWBAND_BLOCK : (b + 1) * NARROWBAND_BLOCK])
+            for b in range(blocks)
+        ]
+    )
     best = int(np.argmax(power))
     if power[best] <= 0.0:
         return None
@@ -303,13 +375,33 @@ def quantize(csi: np.ndarray) -> np.ndarray:
     What it does cost is the AGC step detector in preprocess.py, which looks for a uniform
     frame-to-frame amplitude jump. Per-frame scaling removes the jump before the server sees
     it, so that detector will not fire on Pi frames. The step is gone rather than flagged.
+
+    Scaled from the *data* subcarriers only. Scaling to the frame maximum sounds equivalent and
+    is not: DC and the guard bands are never transmitted, and on this chip the residue sitting in
+    those bins runs an order of magnitude above the real signal. Measured over live frames, the
+    largest guard bin was 34640 against a largest data bin of 2074, so the scale came out ~17x
+    too small and the median data subcarrier quantized to 0.5 — i.e. to zero. Three quarters of
+    every frame reached the server as exact zeros, which is what the waterfall was drawing.
+    Excluding the guards moves that median to 18.8: same int8, thirty-seven times the resolution.
+
+    Guard bins still travel, they are simply no longer allowed to set the scale — they clip,
+    and the server masks them out anyway.
     """
-    peak = float(np.max(np.abs(csi))) if csi.size else 0.0
+    mag = np.abs(csi)
+    if csi.size:
+        mask = data_bins(csi.size)
+        kept = mag[mask]
+        peak = float(kept.max()) if kept.size else float(mag.max())
+    else:
+        peak = 0.0
     scale = QUANT_PEAK / peak if peak > 0.0 else 0.0
 
+    # Clipped, not wrapped. Without this the guard bins — which now exceed full scale by design
+    # — would overflow int8 and come out as small negative numbers: noise dressed up as signal,
+    # in the bins a reader is least likely to check.
     out = np.empty(2 * csi.size, dtype=np.int8)
-    out[0::2] = np.rint(csi.imag * scale).astype(np.int8)
-    out[1::2] = np.rint(csi.real * scale).astype(np.int8)
+    out[0::2] = np.clip(np.rint(csi.imag * scale), -127, 127).astype(np.int8)
+    out[1::2] = np.clip(np.rint(csi.real * scale), -127, 127).astype(np.int8)
     return out
 
 
@@ -743,6 +835,65 @@ class RateGate:
         return self.armed
 
 
+class ClassFollower:
+    """Picks the frame class a *passive* node should measure, from what is actually arriving.
+
+    `RateGate` answers a different question — whether to switch the stimulus on — and it owns
+    the class whenever the stimulus is running, because then the node knows what it is causing.
+    With the stimulus off, nothing does, and the class was simply stuck at full width. On an
+    access point whose traffic is all legacy 20 MHz (beacons, and anything to a broadcast
+    address) that is the wrong half of the world: every frame is detected as narrowband,
+    dropped as off-class, and the node reports a healthy service capturing nothing. Measured on
+    hardware, that took a working 41 Hz down to 1.7 Hz.
+
+    So: follow the majority. Same hysteresis argument as RateGate — a class change costs the
+    server the node's history, so a decision has to hold for `dwell_s` before another can be
+    made, and the majority has to be a real one rather than a coin flip.
+    """
+
+    def __init__(self, *, window_s: float = 5.0, dwell_s: float = 30.0, margin: float = 2.0):
+        self.window_s = window_s
+        self.dwell_s = dwell_s
+        # How many times more of one class than the other before it counts as the answer.
+        self.margin = margin
+
+        self.changes = 0
+        self._window_end: float | None = None
+        self._next_change = 0.0
+        self._seen = (0, 0)
+
+    def update(self, now: float, narrow_seen: int, wide_seen: int, current: bool) -> bool:
+        """Called on every wakeup with the node's running counts. Returns the class to be in."""
+        if self._window_end is None:
+            self._window_end = now + self.window_s
+            self._next_change = now + self.dwell_s
+            self._seen = (narrow_seen, wide_seen)
+            return current
+        if now < self._window_end:
+            return current
+
+        narrow = narrow_seen - self._seen[0]
+        wide = wide_seen - self._seen[1]
+        self._seen = (narrow_seen, wide_seen)
+        self._window_end = now + self.window_s
+
+        if now < self._next_change or (narrow + wide) == 0:
+            return current
+
+        if narrow > wide * self.margin:
+            want = True
+        elif wide > narrow * self.margin:
+            want = False
+        else:
+            return current
+
+        if want == current:
+            return current
+        self.changes += 1
+        self._next_change = now + self.dwell_s
+        return want
+
+
 # -- server control -----------------------------------------------------------------------
 
 # Matches the server's validation in server/csi/nodecontrol.py. Anything else in a desired
@@ -1061,6 +1212,9 @@ class Node:
         self.dropped_class = 0
         # Every full-width frame seen, forwarded or not. RateGate reads it.
         self.wideband_seen = 0
+        # The same for narrowband. ClassFollower compares the two to decide what this node
+        # should be measuring when it is not the one generating the traffic.
+        self.narrowband_seen = 0
 
         # Which class of frame this node is currently forwarding. False is full width — real
         # traffic. True is the 20 MHz world the Ethernet stimulus lives in. The capture loop
@@ -1099,6 +1253,8 @@ class Node:
             # question the gate is asking, and a full-width frame is the only honest answer —
             # the narrowband ones may well be this node's own stimulus coming back.
             self.wideband_seen += 1
+        elif span is not None and splittable:
+            self.narrowband_seen += 1
         if splittable and (span is not None) != self.narrowband:
             # The wrong class for the mode this node is in. Forwarding both would flip n_sub
             # from frame to frame, and the server answers a subcarrier-mask change by throwing
@@ -1247,6 +1403,14 @@ def run(args: argparse.Namespace) -> int:
         )
         controller.start()
 
+    # Tracks what the stimulus thread has been told, so an arm/disarm is logged once rather
+    # than on every wakeup. Previously this was inferred from node.narrowband, which now moves
+    # for a second reason and would have desynchronised the two.
+    stimulus_armed = False
+    follower = ClassFollower(
+        window_s=args.stimulus_window, dwell_s=args.stimulus_dwell
+    )
+
     bad = 0
     unstamped = 0
     n_sub = 0
@@ -1302,34 +1466,48 @@ def run(args: argparse.Namespace) -> int:
                         n_sub = (len(datagram) - _WIRE_HEADER.size) // 2
                         out.sendto(datagram, server)
 
+            mode = control.stimulus_mode
             if stimulus is not None:
                 # The mode governs the arm state; the gate only gets a vote in "auto". Reading
                 # the mode here rather than at startup is what lets the UI switch a running node
                 # between listening and generating traffic. The gate is still stepped in every
                 # mode so its rate estimate stays warm for the moment auto is chosen again.
                 gate_armed = gate.update(now, node.wideband_seen) if gate is not None else False
-                mode = control.stimulus_mode
-                if mode == "always":
-                    want = True
-                elif mode == "off":
-                    want = False
-                else:
-                    want = gate_armed
-                if want != node.narrowband:
-                    node.narrowband = want
-                    stimulus.arm(want)
+                armed = mode == "always" or (mode == "auto" and gate_armed)
+                if armed != stimulus_armed:
+                    stimulus_armed = armed
+                    stimulus.arm(armed)
                     log.info(
-                        "%s the stimulus (%s): measuring at %s from here",
-                        "arming" if want else "disarming",
+                        "%s the stimulus (%s)",
+                        "arming" if armed else "disarming",
                         f"{gate.rate:.1f} Hz real traffic" if mode == "auto" and gate else mode,
-                        "20 MHz" if want else "full width",
                     )
+            else:
+                armed = False
+
+            # While the stimulus is running the node knows what it is causing, so it measures
+            # that. Otherwise it has no traffic of its own and should measure whatever the air
+            # actually carries — see ClassFollower.
+            want = True if armed else follower.update(
+                now, node.narrowband_seen, node.wideband_seen, node.narrowband
+            )
+            if want != node.narrowband:
+                node.narrowband = want
+                log.info(
+                    "measuring %s from here (%s)",
+                    "20 MHz" if want else "full width",
+                    "stimulus armed" if armed else "following the traffic on air",
+                )
 
             if due_to_report(now):
                 rate = node.frames / max(now - reported, 1e-9)
                 extra = ""
                 if stimulus is not None:
-                    state = "on" if node.narrowband else "off"
+                    # From what the stimulus thread was actually told, not from the frame class.
+                    # Those used to be the same fact; since a passive node can select 20 MHz on
+                    # its own, reading the class here reported "stimulus on" for a node that had
+                    # sent nothing — the status line contradicting the (0 sent) beside it.
+                    state = "on" if stimulus_armed else "off"
                     extra = f", stimulus {state} ({stimulus.sent} sent)"
                 log.info(
                     "%d frames (%.1f Hz), %d subcarriers, rssi %d dBm, %d link changes, "
@@ -1339,7 +1517,7 @@ def run(args: argparse.Namespace) -> int:
                 )
                 if (
                     stimulus is not None
-                    and node.narrowband
+                    and stimulus_armed
                     and stimulus.sent > 0
                     and node.frames == 0
                 ):

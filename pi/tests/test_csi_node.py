@@ -444,9 +444,14 @@ def test_amplitude_survives_the_round_trip():
         )
     )
     got = frame.amplitude()
-    want = np.abs(csi) * (csi_node.QUANT_PEAK / np.max(np.abs(csi)))
-    # int8 quantization on each component, so a couple of counts of slack per bin.
-    np.testing.assert_allclose(got, want, atol=2.0)
+    # Scaled from the data subcarriers, not the whole array — DC and the guards are not
+    # transmitted and must not set the scale. See quantize().
+    peak = np.max(np.abs(csi)[csi_node.data_bins(csi.size)])
+    want = np.abs(csi) * (csi_node.QUANT_PEAK / peak)
+    # int8 quantization on each component, so a couple of counts of slack per bin. Bins that
+    # clip are excluded: the guards are allowed to saturate now.
+    unclipped = want <= 127.0
+    np.testing.assert_allclose(got[unclipped], want[unclipped], atol=2.0)
 
 
 def test_rssi_is_clamped_into_the_int8_the_wire_carries():
@@ -899,3 +904,139 @@ def test_controller_scans_when_scan_rev_advances(monkeypatch):
     assert ctrl.scans == 1
     scan_post = [p for _, p in ctrl._posts if p.get("scan") is not None]
     assert scan_post and len(scan_post[0]["scan"]["aps"]) == 2
+
+
+# -- guard bands, quantizer scaling and the overlong-frame quirk ---------------------------
+
+from csi_node import QUANT_PEAK, data_bins  # noqa: E402
+
+
+def test_data_bins_excludes_dc_and_guards():
+    mask = data_bins(256)
+    # k = 0, +/-1 is the DC null; |k| > 122 is guard.
+    assert not mask[0]
+    assert not mask[1] and not mask[255]
+    assert mask[2] and mask[254]
+    assert mask[122] and mask[134]  # k = +122 and k = -122
+    assert not mask[123] and not mask[133]
+    assert mask.sum() == 242
+
+
+@pytest.mark.parametrize("n_sub,expected", [(64, 52), (128, 114), (256, 242)])
+def test_data_bins_counts_per_width(n_sub, expected):
+    assert data_bins(n_sub).sum() == expected
+
+
+def test_quantize_is_not_dominated_by_a_guard_bin():
+    """The bug this fixes: one enormous DC bin set the scale and zeroed the real signal."""
+    csi = np.full(256, 100.0 + 0j, dtype=np.complex64)
+    csi[0] = 34640.0  # DC residue, as measured on hardware
+
+    out = quantize(csi)
+    mag = np.hypot(out[1::2].astype(float), out[0::2].astype(float))
+
+    # Every data subcarrier must survive with real resolution, not round to zero.
+    assert (mag[data_bins(256)] > 0).all()
+    assert np.median(mag[data_bins(256)]) >= QUANT_PEAK / 2
+
+
+def test_quantize_clips_rather_than_wraps():
+    """Guard bins now exceed full scale by design; int8 overflow would wrap them negative."""
+    csi = np.full(256, 10.0 + 0j, dtype=np.complex64)
+    csi[0] = 1e6  # far beyond full scale once the data bins set the scale
+
+    out = quantize(csi)
+    assert out.min() >= -127 and out.max() <= 127
+    # The offending bin saturates positive; it must not come back as a small negative number.
+    assert out[1] == 127
+
+
+def test_occupied_span_finds_the_block_the_guards_were_hiding():
+    """Guard residue used to dominate the block powers and name the wrong block."""
+    csi = np.full(256, 1.0 + 0j, dtype=np.complex64)
+    csi[128:192] = 40.0  # real narrowband signal in Q2
+    csi[0] = 5000.0      # DC residue in Q0, larger than anything real
+    csi[124:132] = 5000.0
+
+    span = occupied_span(csi)
+    assert span is not None
+    assert span.start == 128 and span.stop == 192
+
+
+def test_overlong_frame_is_trimmed_to_a_real_width():
+    csi = sample_csi(256)
+    payload = nexmon_packet(np.append(csi, csi[:1]))  # 257 subcarriers
+    pkt = parse_nexmon(payload)
+
+    assert pkt is not None
+    assert pkt.n_sub == 256
+    np.testing.assert_allclose(pkt.csi, np.rint(csi.real) + 1j * np.rint(csi.imag))
+
+
+def test_overlong_frame_does_not_bump_the_link_epoch():
+    """The churn that reset the server's history twice per stray frame."""
+    node = Node(1)
+    good = nexmon_packet(sample_csi(256))
+    odd = nexmon_packet(np.append(sample_csi(256), 1 + 1j))
+
+    for payload in (good, odd, good, odd, good):
+        node.on_packet(parse_nexmon(payload), 1000)
+
+    assert node.epoch == 0
+    assert node.link_changes == 0
+
+
+# -- following the traffic when the node generates none of its own -------------------------
+
+from csi_node import ClassFollower  # noqa: E402
+
+
+def _settle(f, current=False, narrow=0, wide=0):
+    """Prime the follower's first window, which only establishes a baseline."""
+    return f.update(0.0, narrow, wide, current)
+
+
+def test_follower_adopts_narrowband_when_that_is_all_there_is():
+    """The 41 Hz -> 1.7 Hz regression: an all-beacon channel with the stimulus off."""
+    f = ClassFollower(window_s=5.0, dwell_s=30.0)
+    _settle(f)
+    # One window later, 200 narrowband frames and nothing wide.
+    assert f.update(35.0, 200, 0, False) is True
+
+
+def test_follower_leaves_a_wideband_channel_alone():
+    f = ClassFollower(window_s=5.0, dwell_s=30.0)
+    _settle(f)
+    assert f.update(35.0, 0, 200, False) is False
+
+
+def test_follower_ignores_a_narrow_majority():
+    """A near-even split is not evidence; switching costs the server its history."""
+    f = ClassFollower(window_s=5.0, dwell_s=30.0, margin=2.0)
+    _settle(f)
+    assert f.update(35.0, 110, 100, False) is False
+
+
+def test_follower_respects_the_dwell():
+    f = ClassFollower(window_s=5.0, dwell_s=30.0)
+    _settle(f)
+    assert f.update(35.0, 200, 0, False) is True
+    # Traffic flips straight back, but the decision has to hold.
+    assert f.update(45.0, 200, 400, True) is True
+    assert f.changes == 1
+
+
+def test_follower_says_nothing_on_a_silent_channel():
+    f = ClassFollower(window_s=5.0, dwell_s=30.0)
+    _settle(f, current=True)
+    assert f.update(35.0, 0, 0, True) is True
+    assert f.changes == 0
+
+
+def test_node_counts_both_classes_for_the_follower():
+    node = Node(node_id=20)
+    node.on_packet(parse_nexmon(nexmon_packet(narrowband_csi(), chanspec=CHANSPEC_CH36_80)), 0)
+    node.on_packet(parse_nexmon(nexmon_packet(sample_csi(256), chanspec=CHANSPEC_CH36_80)), 10_000)
+
+    assert node.narrowband_seen == 1
+    assert node.wideband_seen == 1
