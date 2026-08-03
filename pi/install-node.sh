@@ -625,21 +625,55 @@ install_service() {
         CONTROL_URL="http://$SERVER:$HTTP_PORT"
     fi
 
-    # Retunes the extractor to an explicit channel, unfiltered. Separate from capture-up.sh,
-    # which follows the association: an explicit channel is exactly the case where the node is
-    # deliberately not measuring its own link. Written as a wrapper for the same reason the
-    # others are — systemd is not the only caller now, the control loop invokes it too.
-    cat > "$PREFIX/bin/tune.sh" <<EOF
+    # Retunes the capture to an explicit channel, or back to following the association.
+    #
+    # Not by `iw set channel`: on the BCM43455 that returns -95 (EOPNOTSUPP) for both `channel`
+    # and `freq`, verified on a 3B+ running the patched firmware. The chip follows its
+    # *association*, so a channel change means associating somewhere else and letting
+    # csi-connected.sh read the resulting chanspec back out. That is the only sequence this
+    # radio honours, and the earlier version of this file — which just called `iw` and hoped —
+    # left the web UI's channel control silently doing nothing.
+    cat > "$PREFIX/bin/tune.sh" <<'EOF'
 #!/bin/sh
-# Tune the nexmon extractor to an explicit CH/BW (e.g. 36/80). Written by pi/install-node.sh.
+# Retune the capture to CH/BW (e.g. 36/80, 1/40), or 'auto' to follow the association.
+# Written by pi/install-node.sh.
 set -eu
 . /etc/default/csi-node
-CHANNEL="\${1:?tune.sh needs a channel like 36/80}"
-CH="\${CHANNEL%%/*}"
-BW="\${CHANNEL##*/}"
-"$iw" dev "\$CSI_IFACE" set channel "\$CH" 2>/dev/null || \\
-    "$iw" dev "\$CSI_IFACE" set freq "\$CH" 2>/dev/null || true
-exec "\$CSI_CONNECT_SH" -i "\$CSI_IFACE" -C 0x1 -N 0x1 --unfiltered
+
+IW="${CSI_IW:-iw}"
+CHANNEL="${1:?tune.sh needs a channel like 36/80, or auto}"
+
+[ "$CHANNEL" = auto ] && exec "$CSI_CAPTURE_UP_SH"
+
+CH="${CHANNEL%%/*}"
+if [ "$CH" -gt 14 ] 2>/dev/null; then BAND=a; else BAND=bg; fi
+
+CON="$(nmcli -t -f NAME,DEVICE connection show --active 2>/dev/null \
+    | awk -F: -v i="$CSI_IFACE" '$2==i {print $1; exit}')"
+[ -n "$CON" ] || CON="$(nmcli -t -f NAME,TYPE connection show 2>/dev/null \
+    | awk -F: '$2=="802-11-wireless" {print $1; exit}')"
+[ -n "$CON" ] || { echo "tune.sh: no wifi connection profile found" >&2; exit 1; }
+
+# Scanning and association are both disabled while the extractor is armed.
+"$CSI_CONNECT_SH" -i "$CSI_IFACE" --stop >/dev/null 2>&1 || true
+
+SSID="$(nmcli -t -f 802-11-wireless.ssid connection show "$CON" | cut -d: -f2)"
+nmcli device wifi rescan >/dev/null 2>&1 || true
+sleep 5
+# `nmcli -t` escapes the colons inside a BSSID as `\:`, so the field split leaves the
+# backslashes behind. Reassembled and then unescaped: passing `78\:8C\:...` straight to
+# `connection modify` is accepted quietly and pins nothing.
+BSSID="$(nmcli -t -f SSID,BSSID,CHAN device wifi list 2>/dev/null \
+    | awk -F: -v s="$SSID" -v c="$CH" '{n=NF; ch=$n; if ($1==s && ch==c) {
+        mac=$2; for (i=3;i<n;i++) mac=mac":"$i; gsub(/\\/, "", mac); print mac; exit }}')"
+
+# Pinning the BSSID stops the chip drifting back to the other band behind our back. Without a
+# match, set the band and let NetworkManager choose.
+nmcli connection modify "$CON" 802-11-wireless.band "$BAND" \
+    802-11-wireless.bssid "${BSSID:-}" >/dev/null 2>&1 || true
+nmcli connection up "$CON" >/dev/null 2>&1 || true
+
+exec "$CSI_CAPTURE_UP_SH"
 EOF
     chmod 0755 "$PREFIX/bin/tune.sh"
 
@@ -677,9 +711,31 @@ EOF
 set -eu
 . /etc/default/csi-node
 
+IW="${CSI_IW:-iw}"
+
+associated() {
+    "$IW" dev "$CSI_IFACE" link 2>/dev/null | grep -q 'Connected to'
+}
+
+# Wait for the association rather than assuming it. Enabling CSI collection knocks the station
+# off the access point, so on a restart the interface is usually still reconnecting — and with
+# RestartSec=5 the service would otherwise spin in a loop that never lets NetworkManager
+# finish, failing at ExecStartPre every time with "wlan0 is not associated".
+if ! associated; then
+    CON="$(nmcli -t -f NAME,TYPE connection show 2>/dev/null \
+        | awk -F: '$2=="802-11-wireless" {print $1; exit}')"
+    [ -n "$CON" ] && nmcli connection up "$CON" >/dev/null 2>&1 || true
+    i=0
+    while [ $i -lt 20 ]; do
+        associated && break
+        sleep 2
+        i=$((i + 1))
+    done
+fi
+
 if [ -z "${CSI_AP_MAC:-}" ]; then
     # Not pinned at install time, so take whatever this interface is associated with now.
-    CSI_AP_MAC="$(iw dev "$CSI_IFACE" link 2>/dev/null | awk '/Connected to/ {print $3; exit}')"
+    CSI_AP_MAC="$("$IW" dev "$CSI_IFACE" link 2>/dev/null | awk '/Connected to/ {print $3; exit}')"
 fi
 
 if [ -n "${CSI_AP_MAC:-}" ]; then
