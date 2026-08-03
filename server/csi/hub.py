@@ -42,8 +42,9 @@ from .dsp.selection import (
 )
 from .dsp.subcarriers import describe
 from .dsp.vitals import VitalsEstimator
+from .nodecontrol import NodeControlStore
 from .nodes import NodeHealth
-from .protocol import ProtocolError, parse_frame
+from .protocol import Frame, ProtocolError, parse_frame
 from .recorder import Recorder
 from .replay import Replayer
 from .ring import FrameRing, History, Window
@@ -54,6 +55,30 @@ log = logging.getLogger("csi.hub")
 # A client that cannot keep up gets its oldest frames dropped rather than blocking ingest. A
 # second of history is plenty of slack for a browser tab that briefly went to the background.
 CLIENT_QUEUE = 256
+
+# Distinct transmitters remembered per node. An unfiltered monitor on a busy channel hears a
+# long tail of one-off MACs (probe requests, passers-by); past this many, the quietest and
+# longest-silent are the right ones to forget.
+MAX_TRANSMITTERS = 64
+
+
+@dataclass(slots=True)
+class TransmitterStats:
+    """One source MAC as heard by one node, for the WiFi overview."""
+
+    frames: int = 0
+    rssi: int = 0
+    channel: int = 0
+    last_seen: float = 0.0
+
+    def as_dict(self, mac: bytes) -> dict:
+        return {
+            "mac": mac.hex(":"),
+            "frames": self.frames,
+            "rssi": self.rssi,
+            "channel": self.channel,
+            "last_seen": self.last_seen,
+        }
 
 
 def _same_mask(a: np.ndarray, b: np.ndarray) -> bool:
@@ -138,6 +163,11 @@ class NodeState:
         self.heart = VitalsEstimator(settings.heart)
         self.ring: FrameRing | None = None
         self.last_metrics: dict = {}
+        # Transmitters this node has heard, keyed by source MAC. In monitor mode with no
+        # filter that is every station on the channel; with the AP filter, just the AP. Either
+        # way it costs nothing extra — the MAC is already in every frame — and it is the only
+        # traffic picture the server can draw without asking the node to do anything.
+        self.transmitters: dict[bytes, TransmitterStats] = {}
 
         # Set while this node's analysis is running in a worker thread. The presence detector
         # is stateful — a baseline, a calibration accumulator, a debounced state machine — so
@@ -213,6 +243,7 @@ class Hub:
         self.settings = settings or Settings()
         self.settings.ensure_dirs()
         self.sessions = SessionStore(self.settings.recordings_dir)
+        self.control = NodeControlStore(self.settings.data_dir / "node-control.json")
 
         self.nodes: dict[int, NodeState] = {}
         self.clients: set[Client] = set()
@@ -298,10 +329,61 @@ class Hub:
             self.live_frames += 1
             if self.recorder is not None:
                 self.recorder.write(datagram, frame)
+            if any(frame.src_mac):
+                self._observe_transmitter(state, frame, received_at)
 
         processed = state.pre.process(frame)
         state.ensure_ring(processed).push(processed)
         self._fan_out_frame(processed, replay=replay)
+
+    def _observe_transmitter(self, state: NodeState, frame: Frame, received_at: float) -> None:
+        stats = state.transmitters.get(frame.src_mac)
+        if stats is None:
+            if len(state.transmitters) >= MAX_TRANSMITTERS:
+                quietest = min(
+                    state.transmitters, key=lambda mac: state.transmitters[mac].last_seen
+                )
+                del state.transmitters[quietest]
+            stats = state.transmitters[frame.src_mac] = TransmitterStats()
+        stats.frames += 1
+        stats.rssi = frame.rssi
+        stats.channel = frame.channel
+        stats.last_seen = received_at
+
+    def wifi_report(self) -> dict:
+        """Everything the WiFi overview needs: per node, its control state, its last scan, and
+        the transmitters it has heard. Nodes appear whether they were heard from (transmitters)
+        or only configured (control), because the page has to be able to show a node that is
+        currently mid-retune and silent."""
+        node_ids = set(self.nodes) | self.control.node_ids()
+        report = []
+        for node_id in sorted(node_ids):
+            state = self.nodes.get(node_id)
+            transmitters = []
+            if state is not None:
+                transmitters = [
+                    stats.as_dict(mac)
+                    for mac, stats in sorted(
+                        state.transmitters.items(), key=lambda kv: -kv[1].frames
+                    )
+                ]
+            report.append({**self.control.get(node_id), "transmitters": transmitters})
+        return {"nodes": report}
+
+    def patch_node_control(self, node_id: int, patch: dict) -> dict:
+        entry = self.control.patch(node_id, patch)
+        self.broadcast({"type": "node_control", "control": entry})
+        return entry
+
+    def request_node_scan(self, node_id: int) -> dict:
+        entry = self.control.request_scan(node_id)
+        self.broadcast({"type": "node_control", "control": entry})
+        return entry
+
+    def report_node_control(self, node_id: int, body: dict) -> dict:
+        entry = self.control.report(node_id, body)
+        self.broadcast({"type": "node_control", "control": entry})
+        return entry
 
     def _fan_out_frame(self, processed: Processed, *, replay: bool) -> None:
         if not self.clients:

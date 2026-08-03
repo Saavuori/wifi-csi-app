@@ -45,13 +45,19 @@ every datagram through the server's own parser so the two cannot drift.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
+import re
+import shutil
 import socket
 import struct
+import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 
 import numpy as np
 
@@ -737,6 +743,299 @@ class RateGate:
         return self.armed
 
 
+# -- server control -----------------------------------------------------------------------
+
+# Matches the server's validation in server/csi/nodecontrol.py. Anything else in a desired
+# config is left alone rather than guessed at: the server is supposed to have validated it, but
+# the node is the one holding the radio, and a bad spec applied here breaks the capture.
+_CHANNEL_SPEC_RE = re.compile(r"^\d{1,3}/(20|40|80)$")
+_STIMULUS_MODES = ("auto", "always", "off")
+
+
+def freq_to_channel(freq_mhz: int) -> int:
+    """IEEE channel number from a centre frequency, the same arithmetic iw itself uses."""
+    if freq_mhz == 2484:
+        return 14
+    if 2412 <= freq_mhz < 2484:
+        return (freq_mhz - 2407) // 5
+    if 5955 <= freq_mhz <= 7115:  # 6 GHz: channel 1 starts at 5955
+        return (freq_mhz - 5950) // 5
+    if 4910 <= freq_mhz <= 5895:
+        return (freq_mhz - 5000) // 5
+    return 0
+
+
+def parse_iw_scan(text: str) -> list[dict]:
+    """`iw dev <iface> scan` output into one dict per BSS.
+
+    Text parsing of a tool that warns its output is not a stable API — kept deliberately
+    minimal (fields that have printed the same way for a decade) and forgiving: a BSS whose
+    block this cannot read becomes an entry with what was readable, never an exception. The
+    scan page rendering "width 20" for an AP whose width was unreadable beats a node that
+    stops reporting because someone's beacon had an exotic element in it.
+
+    Station count and channel utilisation come from the BSS Load element (802.11e), which most
+    consumer APs include: utilisation is the fraction of time the AP sensed the channel busy,
+    normalized to 0..1 here from the spec's 0..255.
+    """
+    aps: list[dict] = []
+    ap: dict | None = None
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if raw_line.startswith("BSS "):
+            match = re.match(r"BSS ([0-9a-f:]{17})", raw_line, re.IGNORECASE)
+            ap = None
+            if match is not None:
+                ap = {
+                    "bssid": match.group(1).lower(),
+                    "ssid": "",
+                    "freq": 0,
+                    "channel": 0,
+                    "width": 20,
+                    "signal": None,
+                    "stations": None,
+                    "utilisation": None,
+                    "associated": "-- associated" in raw_line,
+                }
+                aps.append(ap)
+            continue
+        if ap is None:
+            continue
+        if line.startswith("freq:"):
+            try:
+                ap["freq"] = int(float(line.split(":", 1)[1].strip()))
+            except ValueError:
+                continue
+            ap["channel"] = freq_to_channel(ap["freq"])
+        elif line.startswith("signal:"):
+            match = re.search(r"(-?\d+(?:\.\d+)?)", line)
+            if match is not None:
+                ap["signal"] = float(match.group(1))
+        elif line.startswith("SSID:"):
+            ap["ssid"] = line.split(":", 1)[1].strip()
+        elif line.startswith("* primary channel:"):
+            try:
+                ap["channel"] = int(line.split(":", 1)[1].strip())
+            except ValueError:
+                pass
+        elif line.startswith("* secondary channel offset:"):
+            if line.split(":", 1)[1].strip() in ("above", "below") and ap["width"] < 40:
+                ap["width"] = 40
+        elif line.startswith("* channel width:"):
+            # VHT operation: "1 (80 MHz)" or "2 (160 MHz)"; HE prints similarly.
+            match = re.search(r"\((\d+) MHz\)", line)
+            if match is not None:
+                ap["width"] = max(ap["width"], int(match.group(1)))
+        elif line.startswith("* station count:"):
+            try:
+                ap["stations"] = int(line.split(":", 1)[1].strip())
+            except ValueError:
+                pass
+        elif line.startswith("* channel utilisation:"):
+            match = re.search(r"(\d+)/255", line)
+            if match is not None:
+                ap["utilisation"] = round(int(match.group(1)) / 255, 3)
+    aps.sort(key=lambda entry: entry["signal"] if entry["signal"] is not None else -1000,
+             reverse=True)
+    return aps
+
+
+class ControlState:
+    """What the control loop has decided, read by the capture loop.
+
+    Attribute reads and writes of a str are atomic under the GIL, and the capture loop
+    re-reads it every wakeup, so no lock is needed — the worst case is one wakeup of lag.
+    """
+
+    def __init__(self, stimulus_mode: str) -> None:
+        self.stimulus_mode = stimulus_mode
+
+
+def _run_command(argv: list[str], timeout_s: float = 30.0) -> str:
+    """Run a helper, return its stdout. Raises CalledProcessError with stderr attached."""
+    result = subprocess.run(
+        argv, capture_output=True, text=True, timeout=timeout_s, check=True
+    )
+    return result.stdout
+
+
+class Controller(threading.Thread):
+    """Polls the server for this node's desired configuration and applies it.
+
+    The uplink is one-way UDP, so control rides the other transport the node already has a
+    route for: plain HTTP to the same server. Every poll ends with a report of what is
+    actually applied — the server treats absence of reports as "this node does not take
+    control", so a node behind an old server, or a server behind an old node, degrades to
+    exactly the behaviour both had before this existed.
+
+    Three desired fields are understood:
+      channel   "auto" follows the association (capture-up), "CH/BW" retunes the extractor
+                to an explicit channel, unfiltered.
+      stimulus  handed to the capture loop through `ControlState`; applied within one wakeup.
+      scan_rev  when it moves, stop collection, `iw scan`, retune, and report what was seen.
+                Capture is dark for the few seconds the scan takes; the epoch mechanics treat
+                the retune as the link change it is.
+    """
+
+    def __init__(
+        self,
+        url: str,
+        node_id: int,
+        state: ControlState,
+        node: Node,
+        iface: str,
+        *,
+        poll_s: float = 3.0,
+        runner=_run_command,
+    ) -> None:
+        super().__init__(name="controller", daemon=True)
+        self.url = url.rstrip("/")
+        self.node_id = node_id
+        self.state = state
+        self.node = node
+        self.iface = iface
+        self.poll_s = poll_s
+        self.runner = runner
+
+        # What this thread believes it has applied. Channel starts as "auto" because the
+        # service's ExecStartPre (capture-up.sh) has already followed the association by the
+        # time this thread first polls.
+        self.applied_channel = "auto"
+        self.applied_rev: int | None = None
+        self.applied_scan_rev: int | None = None
+        self.retunes = 0
+        self.scans = 0
+        self.failures = 0
+
+        self._stop = threading.Event()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def run(self) -> None:
+        log.info("control: polling %s every %gs", self.url, self.poll_s)
+        while not self._stop.is_set():
+            try:
+                self._poll_once()
+            except (urllib.error.URLError, OSError, ValueError) as exc:
+                self.failures += 1
+                if self.failures in (1, 10) or self.failures % 100 == 0:
+                    log.warning("control poll failed (%d so far): %s", self.failures, exc)
+            self._stop.wait(self.poll_s)
+
+    # -- one round ------------------------------------------------------------------------
+
+    def _poll_once(self) -> None:
+        control = self._http("GET", f"/api/nodes/{self.node_id}/control")
+        desired = control.get("desired") or {}
+        revision = int(control.get("revision", 0))
+        scan_rev = int(control.get("scan_rev", 0))
+
+        if self.applied_rev != revision:
+            self._apply(desired)
+            self.applied_rev = revision
+
+        scan = None
+        if self.applied_scan_rev is None:
+            # First contact: whatever scans were requested before this process existed are
+            # not owed retroactively.
+            self.applied_scan_rev = scan_rev
+        elif scan_rev > self.applied_scan_rev:
+            scan = self._scan()
+            self.applied_scan_rev = scan_rev
+
+        self._report(scan)
+
+    def _apply(self, desired: dict) -> None:
+        mode = desired.get("stimulus")
+        if mode in _STIMULUS_MODES and mode != self.state.stimulus_mode:
+            log.info("control: stimulus mode -> %s", mode)
+            self.state.stimulus_mode = mode
+
+        channel = desired.get("channel")
+        if isinstance(channel, str) and channel != self.applied_channel:
+            if channel == "auto" or _CHANNEL_SPEC_RE.match(channel):
+                self._retune(channel)
+
+    def _retune(self, channel: str) -> None:
+        if channel == "auto":
+            script = os.environ.get("CSI_CAPTURE_UP_SH", "")
+            argv = [script]
+        else:
+            script = os.environ.get("CSI_TUNE_SH", "")
+            argv = [script, channel]
+        if not script:
+            log.warning("control: no retune helper configured; cannot apply channel %r "
+                        "(set CSI_TUNE_SH / CSI_CAPTURE_UP_SH in /etc/default/csi-node)",
+                        channel)
+            return
+        log.info("control: retuning to %s", channel)
+        self.runner(argv)
+        self.applied_channel = channel
+        self.retunes += 1
+
+    def _scan(self) -> dict | None:
+        """Stop collection, scan, retune, and hand back what was heard.
+
+        The retune runs in a `finally`: a scan that failed halfway must not leave the radio
+        in managed mode with the service still believing it is capturing.
+        """
+        iw = os.environ.get("CSI_IW") or shutil.which("iw") or "/usr/sbin/iw"
+        connect = os.environ.get("CSI_CONNECT_SH", "")
+        log.info("control: scanning on %s (capture pauses)", self.iface)
+        self.scans += 1
+        try:
+            if connect:
+                self.runner([connect, "-i", self.iface, "--stop"])
+            out = None
+            for attempt in range(3):
+                try:
+                    out = self.runner([iw, "dev", self.iface, "scan"], timeout_s=20.0)
+                    break
+                except subprocess.CalledProcessError:
+                    # -EBUSY while wpa_supplicant reclaims the interface after --stop.
+                    if attempt == 2:
+                        raise
+                    time.sleep(2.0)
+            return {"aps": parse_iw_scan(out or "")}
+        except (subprocess.SubprocessError, OSError) as exc:
+            log.warning("control: scan failed: %s", exc)
+            return None
+        finally:
+            try:
+                self._retune(self.applied_channel)
+            except (subprocess.SubprocessError, OSError) as exc:
+                log.error("control: could not restore capture after scan: %s", exc)
+
+    def _report(self, scan: dict | None) -> None:
+        payload: dict = {
+            "revision": self.applied_rev or 0,
+            "scan_rev": self.applied_scan_rev or 0,
+            "applied": {
+                "channel": self.applied_channel,
+                "stimulus": self.state.stimulus_mode,
+                "narrowband": self.node.narrowband,
+                "observed_channel": self.node.current_channel(),
+                "capabilities": ["channel", "stimulus", "scan"],
+            },
+        }
+        if scan is not None:
+            payload["scan"] = scan
+        self._http("POST", f"/api/nodes/{self.node_id}/control/report", payload)
+
+    def _http(self, method: str, path: str, payload: dict | None = None) -> dict:
+        data = json.dumps(payload).encode() if payload is not None else None
+        request = urllib.request.Request(
+            self.url + path,
+            data=data,
+            method=method,
+            headers={"Content-Type": "application/json"} if data else {},
+        )
+        with urllib.request.urlopen(request, timeout=5.0) as response:
+            body = json.loads(response.read().decode())
+        return body if isinstance(body, dict) else {}
+
+
 # -- the node -----------------------------------------------------------------------------
 
 
@@ -770,6 +1069,12 @@ class Node:
 
         self._link: tuple[bytes, int, int] | None = None
         self._t0_us: int | None = None
+        # The channel of the last frame forwarded, so the controller can report what the radio
+        # is actually on rather than only what it was asked for. 0 until the first frame.
+        self._channel = 0
+
+    def current_channel(self) -> int:
+        return self._channel
 
     def on_packet(self, pkt: NexmonPacket, capture_us: int) -> bytes | None:
         """One nexmon packet in, one uplink datagram out (or None if it is not ours)."""
@@ -857,6 +1162,7 @@ class Node:
             src_mac=pkt.src_mac,
             link_epoch=self.epoch,
         )
+        self._channel = chanspec_channel(pkt.chanspec)
         self.seq += 1
         self.frames += 1
         return datagram
@@ -900,37 +1206,46 @@ def run(args: argparse.Namespace) -> int:
             prober = Prober(target, args.probe_hz, iface=args.iface)
             prober.start()
 
+    # The stimulus mode lives here rather than in `args` so the controller can change it at
+    # runtime. The capture loop reads `control.stimulus_mode` every wakeup and asks for the
+    # arm state that mode implies, which is what lets the UI's "listen only / generate traffic"
+    # switch take effect on a running node.
+    control = ControlState(args.stimulus)
+
+    # Built whenever a rate is configured, even when the initial mode is "off": a node the UI
+    # can later switch to "always" needs the thread and its socket to already exist. It stays
+    # disarmed and silent until something asks for it, so an off node costs one idle thread.
     stimulus = None
     gate = None
-    if args.stimulus != "off" and args.stimulus_hz > 0:
+    if args.stimulus_hz > 0:
         stimulus = MulticastStimulus(
             args.stimulus_iface, args.stimulus_group, args.stimulus_port, args.stimulus_hz
         )
         stimulus.start()
-        if args.stimulus == "always":
-            node.narrowband = True
-            stimulus.arm(True)
-            log.info(
-                "stimulus: %s -> %s:%d at %g Hz, always on; measuring at 20 MHz",
-                args.stimulus_iface, args.stimulus_group, args.stimulus_port, args.stimulus_hz,
-            )
-        else:
-            gate = RateGate(
-                floor_hz=args.stimulus_floor_hz,
-                ceiling_hz=args.stimulus_ceiling_hz,
-                window_s=args.stimulus_window,
-                dwell_s=args.stimulus_dwell,
-            )
-            log.info(
-                "stimulus: %s -> %s:%d at %g Hz, arming below %g Hz of real traffic",
-                args.stimulus_iface, args.stimulus_group, args.stimulus_port,
-                args.stimulus_hz, args.stimulus_floor_hz,
-            )
+        gate = RateGate(
+            floor_hz=args.stimulus_floor_hz,
+            ceiling_hz=args.stimulus_ceiling_hz,
+            window_s=args.stimulus_window,
+            dwell_s=args.stimulus_dwell,
+        )
+        log.info(
+            "stimulus: %s -> %s:%d at %g Hz, mode %s (auto arms below %g Hz of real traffic)",
+            args.stimulus_iface, args.stimulus_group, args.stimulus_port,
+            args.stimulus_hz, args.stimulus, args.stimulus_floor_hz,
+        )
 
     log.info(
         "node %d: %s -> %s:%d, core %d stream %d",
         args.node_id, args.iface, args.server, args.port, args.core, args.spatial,
     )
+
+    controller = None
+    if args.control_url:
+        controller = Controller(
+            args.control_url, args.node_id, control, node, args.iface,
+            poll_s=args.control_poll,
+        )
+        controller.start()
 
     bad = 0
     unstamped = 0
@@ -987,16 +1302,27 @@ def run(args: argparse.Namespace) -> int:
                         n_sub = (len(datagram) - _WIRE_HEADER.size) // 2
                         out.sendto(datagram, server)
 
-            if gate is not None:
-                armed = gate.update(now, node.wideband_seen)
-                if armed != node.narrowband:
-                    node.narrowband = armed
-                    stimulus.arm(armed)
+            if stimulus is not None:
+                # The mode governs the arm state; the gate only gets a vote in "auto". Reading
+                # the mode here rather than at startup is what lets the UI switch a running node
+                # between listening and generating traffic. The gate is still stepped in every
+                # mode so its rate estimate stays warm for the moment auto is chosen again.
+                gate_armed = gate.update(now, node.wideband_seen) if gate is not None else False
+                mode = control.stimulus_mode
+                if mode == "always":
+                    want = True
+                elif mode == "off":
+                    want = False
+                else:
+                    want = gate_armed
+                if want != node.narrowband:
+                    node.narrowband = want
+                    stimulus.arm(want)
                     log.info(
-                        "%s the stimulus: %.1f Hz of real traffic; measuring at %s from here",
-                        "arming" if armed else "disarming",
-                        gate.rate,
-                        "20 MHz" if armed else "full width",
+                        "%s the stimulus (%s): measuring at %s from here",
+                        "arming" if want else "disarming",
+                        f"{gate.rate:.1f} Hz real traffic" if mode == "auto" and gate else mode,
+                        "20 MHz" if want else "full width",
                     )
 
             if due_to_report(now):
@@ -1032,6 +1358,8 @@ def run(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        if controller is not None:
+            controller.stop()
         if prober is not None:
             prober.stop()
         if stimulus is not None:
@@ -1090,6 +1418,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="seconds the gate averages the frame rate over (default 5)")
     p.add_argument("--stimulus-dwell", type=float, default=30.0,
                    help="minimum seconds between gate decisions (default 30)")
+    p.add_argument("--control-url",
+                   default=os.environ.get("CSI_CONTROL_URL") or None,
+                   help="base URL of the server's HTTP API to poll for channel/stimulus "
+                        "control (e.g. http://127.0.0.1:8080); disabled if unset")
+    p.add_argument("--control-poll", type=float,
+                   default=float(os.environ.get("CSI_CONTROL_POLL", "3")),
+                   help="seconds between control polls (default 3)")
     p.add_argument("--rssi-interval", type=float, default=1.0,
                    help="seconds between /proc/net/wireless reads (default 1)")
     p.add_argument("--status-interval", type=float, default=10.0,

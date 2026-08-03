@@ -1313,6 +1313,160 @@ input[type="range"] {
   color: var(--dim);
 }
 
+/* -- wifi overview ----------------------------------------------------------------------- */
+
+.wifi-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+
+.wifi-node {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+
+.wifi-controls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+
+.wifi-channel-row {
+  display: flex;
+  gap: var(--s2);
+}
+
+.wifi-channel-input {
+  flex: 1;
+  font-family: var(--mono);
+}
+
+/* Asked-vs-applied, side by side: the whole point of the control loop is that these can differ,
+   so they are shown together rather than the UI pretending the request is the state. */
+.wifi-applied {
+  display: flex;
+  gap: var(--s4);
+  padding: var(--s2) var(--s3);
+  background: var(--panel-2);
+  border-radius: var(--r-md);
+}
+
+.wifi-applied-stat {
+  display: flex;
+  flex-direction: column;
+}
+
+.wifi-applied-value {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.wifi-applied-stat.warn .wifi-applied-value {
+  color: var(--warn);
+}
+
+.wifi-applied-label {
+  font-size: var(--t-micro);
+  color: var(--dim);
+}
+
+.wifi-subhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+}
+
+.wifi-scan h3,
+.wifi-tx h3 {
+  margin: 0 0 var(--s2);
+  font-size: var(--t-label);
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.wifi-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--t-label);
+}
+
+.wifi-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--dim);
+  font-size: var(--t-micro);
+  padding: var(--s1) var(--s2);
+  border-bottom: 1px solid var(--line);
+}
+
+.wifi-table td {
+  padding: var(--s2);
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+.wifi-ap-associated {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.wifi-ssid {
+  font-weight: 600;
+}
+
+.wifi-bssid {
+  font-family: var(--mono);
+  font-size: var(--t-micro);
+  color: var(--dim);
+}
+
+.wifi-band {
+  font-size: var(--t-micro);
+  color: var(--dim);
+}
+
+.wifi-signal {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.wifi-signal.good {
+  color: var(--good);
+}
+.wifi-signal.warn {
+  color: var(--warn);
+}
+.wifi-signal.bad {
+  color: var(--bad);
+}
+
+.wifi-unit {
+  color: var(--dim);
+  font-size: var(--t-micro);
+}
+
+.wifi-load {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.wifi-ap-action {
+  text-align: right;
+}
+
+.wifi-scan-age {
+  margin: var(--s2) 0 0;
+}
+
+.button-small {
+  padding: var(--s1) var(--s2);
+  font-size: var(--t-micro);
+}
+
 /* -- larger phones ----------------------------------------------------------------------- */
 
 @media (min-width: 400px) {

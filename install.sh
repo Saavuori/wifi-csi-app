@@ -321,7 +321,9 @@ install_node() {
     [ -f "$SRC_DIR/pi/install-node.sh" ] \
         || { warn "pi/install-node.sh is missing; skipping"; return 0; }
 
-    local args=(--server 127.0.0.1 --port "$UDP_PORT" --node-id "$NODE_ID")
+    local args=(
+        --server 127.0.0.1 --port "$UDP_PORT" --http-port "$HTTP_PORT" --node-id "$NODE_ID"
+    )
     [ "$ASSUME_YES" = 1 ] && args+=(--yes)
 
     # The node talks to the server over the loopback: both are on this Pi, and the container

@@ -743,3 +743,159 @@ def test_real_frame_length_is_incompatible_with_a_16_byte_header():
     """
     assert (REAL_FRAME_LEN - 16) % 4 != 0
     assert (REAL_FRAME_LEN - NEXMON_HEADER_SIZE) % 4 == 0
+
+
+# -- server control: scan parsing and the poll loop ---------------------------------------
+
+from csi_node import Controller, ControlState, freq_to_channel, parse_iw_scan  # noqa: E402
+
+
+def test_freq_to_channel_covers_the_bands():
+    assert freq_to_channel(2412) == 1
+    assert freq_to_channel(2437) == 6
+    assert freq_to_channel(2484) == 14
+    assert freq_to_channel(5180) == 36
+    assert freq_to_channel(5955) == 1  # 6 GHz ch 1
+    assert freq_to_channel(3000) == 0  # nothing plausible
+
+
+IW_SCAN = """\
+BSS 7a:da:88:a3:03:4c(on wlan0) -- associated
+\tfreq: 5180
+\tsignal: -42.00 dBm
+\tSSID: asikkala
+\tHT operation:
+\t\t * primary channel: 36
+\t\t * secondary channel offset: above
+\tVHT operation:
+\t\t * channel width: 1 (80 MHz)
+\tBSS Load:
+\t\t * station count: 5
+\t\t * channel utilisation: 51/255
+BSS 00:11:22:33:44:55(on wlan0)
+\tfreq: 2437
+\tsignal: -70.00 dBm
+\tSSID: neighbour
+"""
+
+
+def test_parse_iw_scan_reads_both_bss():
+    aps = parse_iw_scan(IW_SCAN)
+    assert len(aps) == 2
+    # Sorted by signal, so the strong 5 GHz AP is first.
+    strong = aps[0]
+    assert strong["bssid"] == "7a:da:88:a3:03:4c"
+    assert strong["ssid"] == "asikkala"
+    assert strong["channel"] == 36
+    assert strong["width"] == 80
+    assert strong["signal"] == -42.0
+    assert strong["stations"] == 5
+    assert strong["utilisation"] == 0.2  # 51/255
+    assert strong["associated"] is True
+
+    weak = aps[1]
+    assert weak["ssid"] == "neighbour"
+    assert weak["channel"] == 6
+    assert weak["width"] == 20
+    assert weak["associated"] is False
+
+
+def test_parse_iw_scan_tolerates_junk():
+    assert parse_iw_scan("") == []
+    assert parse_iw_scan("garbage\nno bss here\n") == []
+    # A BSS with an unreadable body still appears, with defaults.
+    aps = parse_iw_scan("BSS aa:bb:cc:dd:ee:ff(on wlan0)\n\tsomething weird\n")
+    assert len(aps) == 1 and aps[0]["width"] == 20 and aps[0]["ssid"] == ""
+
+
+class FakeController(Controller):
+    """A Controller whose HTTP and shell calls are recorded instead of performed."""
+
+    def __init__(self, node, **kwargs):
+        self._responses = kwargs.pop("responses", [])
+        self._posts = []
+        self._commands = []
+        state = ControlState("auto")
+        super().__init__(
+            "http://server:8080", 20, state, node, "wlan0",
+            runner=self._fake_run, **kwargs,
+        )
+        self._get_index = 0
+
+    def _fake_run(self, argv, timeout_s=30.0):
+        self._commands.append(argv)
+        if argv[1:3] == ["dev", "scan"] or "scan" in argv:
+            return IW_SCAN
+        return ""
+
+    def _http(self, method, path, payload=None):
+        if method == "POST":
+            self._posts.append((path, payload))
+            return {}
+        response = self._responses[min(self._get_index, len(self._responses) - 1)]
+        self._get_index += 1
+        return response
+
+
+def _node():
+    return Node(20)
+
+
+def test_controller_applies_stimulus_mode_from_desired():
+    ctrl = FakeController(
+        _node(),
+        responses=[{
+            "desired": {"channel": "auto", "stimulus": "off"},
+            "revision": 3, "scan_rev": 0,
+        }],
+    )
+    ctrl._poll_once()
+    assert ctrl.state.stimulus_mode == "off"
+    assert ctrl.applied_rev == 3
+    # It reports the applied state back.
+    assert ctrl._posts and ctrl._posts[0][1]["applied"]["stimulus"] == "off"
+
+
+def test_controller_retunes_on_channel_change(monkeypatch):
+    monkeypatch.setenv("CSI_TUNE_SH", "/opt/csi-node/bin/tune.sh")
+    ctrl = FakeController(
+        _node(),
+        responses=[{
+            "desired": {"channel": "36/80", "stimulus": "auto"},
+            "revision": 1, "scan_rev": 0,
+        }],
+    )
+    ctrl._poll_once()
+    assert ctrl.applied_channel == "36/80"
+    assert ctrl.retunes == 1
+    assert ["/opt/csi-node/bin/tune.sh", "36/80"] in ctrl._commands
+
+
+def test_controller_ignores_unchanged_revision():
+    resp = {
+        "desired": {"channel": "auto", "stimulus": "always"},
+        "revision": 2, "scan_rev": 0,
+    }
+    ctrl = FakeController(_node(), responses=[resp, resp])
+    ctrl._poll_once()
+    ctrl._poll_once()
+    # Applied once; the second poll saw the same revision and did nothing but report.
+    assert ctrl.state.stimulus_mode == "always"
+    assert len(ctrl._posts) == 2
+
+
+def test_controller_scans_when_scan_rev_advances(monkeypatch):
+    monkeypatch.setenv("CSI_IW", "/usr/sbin/iw")
+    ctrl = FakeController(
+        _node(),
+        responses=[
+            {"desired": {"channel": "auto", "stimulus": "auto"}, "revision": 0, "scan_rev": 0},
+            {"desired": {"channel": "auto", "stimulus": "auto"}, "revision": 0, "scan_rev": 1},
+        ],
+    )
+    ctrl._poll_once()  # establishes the scan_rev baseline; no scan owed
+    assert ctrl.scans == 0
+    ctrl._poll_once()  # scan_rev advanced -> scan
+    assert ctrl.scans == 1
+    scan_post = [p for _, p in ctrl._posts if p.get("scan") is not None]
+    assert scan_post and len(scan_post[0]["scan"]["aps"]) == 2

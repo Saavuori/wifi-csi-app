@@ -11,6 +11,7 @@ import { sessionsView } from "./views/sessions";
 import { subcarrierView } from "./views/subcarriers";
 import type { View } from "./views/view";
 import { waterfallView } from "./views/waterfall";
+import { wifiView } from "./views/wifi";
 
 const views: View[] = [
   waterfallView(),
@@ -21,6 +22,7 @@ const views: View[] = [
   placementView(),
   sessionsView(),
   healthView(),
+  wifiView(),
 ];
 
 /**
@@ -46,13 +48,19 @@ const TABS: Tab[] = [
   { label: "Motion", glyph: ICONS.motion, route: "motion", covers: ["motion"] },
   { label: "Vitals", glyph: ICONS.vitals, route: "breathing", covers: ["breathing", "heart"] },
   { label: "Placement", glyph: ICONS.placement, route: "placement", covers: ["placement"] },
-  { label: "More", glyph: ICONS.more, route: null, covers: ["subcarriers", "sessions", "health"] },
+  {
+    label: "More",
+    glyph: ICONS.more,
+    route: null,
+    covers: ["subcarriers", "sessions", "health", "wifi"],
+  },
 ];
 
 const MORE: { id: string; blurb: string }[] = [
   { id: "subcarriers", blurb: "A handful of traces, close up — the shape of a single breath" },
   { id: "sessions", blurb: "Record the room, replay it through the same pipeline" },
   { id: "health", blurb: "Rate, jitter, loss and roaming, per node" },
+  { id: "wifi", blurb: "Channel and traffic per node; scan the air to pick an access point" },
 ];
 
 const content = el("main", { class: "content" });

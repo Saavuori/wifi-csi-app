@@ -83,6 +83,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         hub.recalibrate(node_id)
         return {"ok": True}
 
+    # -- node control and the WiFi overview -----------------------------------------------
+
+    @app.get("/api/wifi")
+    async def wifi() -> dict:
+        return hub.wifi_report()
+
+    @app.get("/api/nodes/{node_id}/control")
+    async def get_node_control(node_id: int) -> dict:
+        _check_node_id(node_id)
+        return hub.control.get(node_id)
+
+    @app.patch("/api/nodes/{node_id}/control")
+    async def patch_node_control(node_id: int, body: dict = Body(...)) -> dict:
+        _check_node_id(node_id)
+        return hub.patch_node_control(node_id, body)
+
+    @app.post("/api/nodes/{node_id}/control/scan")
+    async def request_node_scan(node_id: int) -> dict:
+        _check_node_id(node_id)
+        return hub.request_node_scan(node_id)
+
+    @app.post("/api/nodes/{node_id}/control/report")
+    async def report_node_control(node_id: int, body: dict = Body(...)) -> dict:
+        """The node's half of the loop: what it applied, and scan results when it has fresh
+        ones. Kept separate from PATCH so a node can never alter what the operator asked for."""
+        _check_node_id(node_id)
+        return hub.report_node_control(node_id, body)
+
     # -- sessions -------------------------------------------------------------------------
 
     @app.get("/api/sessions")
@@ -240,6 +268,14 @@ async def _pump(ws: WebSocket, client: Client) -> None:
             await ws.send_bytes(message)
         else:
             await ws.send_text(json.dumps(message, separators=(",", ":")))
+
+
+def _check_node_id(node_id: int) -> None:
+    """Path-parameter validation shared by the control endpoints. 0 and 255 are reserved on
+    the wire, and an id outside a byte could never appear in a frame — storing desired config
+    for it would create a phantom node the UI then dutifully renders."""
+    if not 1 <= node_id <= 254:
+        raise HTTPException(400, "node_id must be 1..254")
 
 
 def _node_id(value: Any) -> int | None:
