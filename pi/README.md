@@ -197,6 +197,58 @@ so the DSP was tuned on it. The real cost is that `preprocess.py`'s AGC step det
 fire on Pi frames: per-frame scaling removes the step before the server sees it. The step is
 gone rather than flagged.
 
+## What the bcm43455 actually hands up
+
+Measured on a Pi 3B+, Debian 13, firmware 7.45.189 with nexmon_csi, associated to a TP-Link
+Archer MR200 on channel 36 at 80 MHz, on 2026-08-03. Every number below came from live capture,
+and each one was producing a visible fault before it was understood.
+
+**The guard bands are not small.** DC and the guard subcarriers are never transmitted, so their
+FFT bins hold whatever was left in them. Over 25 consecutive frames:
+
+| | mean | median | max |
+|---|---|---|---|
+| data bins (\|k\| 2..122) | 470 | 15 | **2074** |
+| DC and guard bins | 6114 | 2650 | **34640** |
+
+The residue runs seventeen times the largest real subcarrier. Any statistic taken over a whole
+frame is therefore a statistic about the guard bands, and two places were taking one:
+
+- `quantize()` scaled each frame to its maximum, which was always a guard bin. The median data
+  subcarrier came out at 0.5 and rounded to **zero** — three quarters of every frame reached the
+  server as exact zeros. That is what the waterfall was drawing, and it reads as random specks
+  rather than as the systematic fault it is.
+- `occupied_span()` compared 64-bin block powers computed the same way. Including guards, a live
+  frame measured `[1.9e7, 2.4e6, 5.9e6, 2.1e5]` — loudest block Q0, by 4.7 dB, below the margin,
+  so nothing was ever trimmed. The same frames counting only data bins measure
+  `[1.3e5, 6.7e4, 2.3e6, 2.1e5]`: Q2, by 10.4 dB. The old reading was not marginal, it named the
+  wrong block.
+
+Both now exclude non-data bins. The median quantized level moves from 0.5 to 18.8 and the dead
+fraction from 77% to 8%, with no change to the wire format.
+
+**About 1% of frames are one subcarrier too long** — 1046 bytes rather than 1042, so 257
+subcarriers instead of 256. The extra sample is at the *end*: correlating the mean magnitude
+profile of the odd frames against the 256-wide population gives 0.997 dropping the last sample
+and 0.236 dropping the first. They are trimmed rather than discarded, because `n_sub` is part of
+the link key — left alone, each one flipped it twice and the server answers a link-epoch change
+by throwing that node's history away. Measured at 41 Hz that was **2778 history resets in an
+hour**, which is why presence and breathing never accumulated a usable window while the
+waterfall looked perfectly healthy.
+
+**Collection stops without saying so.** After several hours the station was still associated to
+the right BSSID, the chanspec still read 36/80, `csi_collect` still read back as 1, and no
+packet had reached the capture socket for hours. Re-running the extractor setup fixed it
+instantly. There is no field that distinguishes this from an idle channel, so `csi_node.py`
+re-applies the configuration after `--stall-s` seconds without a frame.
+
+**A passive node has to choose a class for itself.** Beacons and anything sent to a broadcast
+address go out at the legacy 20 MHz basic rate whatever the channel width, so on a quiet access
+point *every* frame is narrowband. The frame class used to be owned by the stimulus, which meant
+a node generating no traffic was pinned to full width and dropped every one of those as
+off-class — 41 Hz to 1.7 Hz. `ClassFollower` gives a listening node the same decision from the
+traffic it can see.
+
 ## Known limitation: nexutil cannot reach the firmware
 
 Verified on a Pi 4 Model B, Debian 13 (trixie), kernel 6.12, on 2026-08-01. Everything up to the
@@ -273,6 +325,14 @@ If the service is up but no frames arrive, work down this list:
 | `CSI_STIMULUS` | `auto` | `always` to force it on, `off` to disable |
 | `CSI_STIMULUS_IFACE` | `eth0` | Wired interface the multicast leaves by |
 | `CSI_STIMULUS_HZ` | 50 | Rate while armed |
+| `CSI_STALL_S` | 90 | Re-apply the extractor after this long with no frames; 0 to disable |
+| `CSI_CONTROL_URL` | the server's HTTP port | Polled for channel and stimulus changes from the web UI; blank to make this node read-only |
+| `CSI_TUNE_SH` | `/opt/csi-node/bin/tune.sh` | Helper the control loop calls to change channel |
+| `CSI_CAPTURE_UP_SH` | `/opt/csi-node/bin/capture-up.sh` | Helper for `auto` channel and for re-arming |
+| `CSI_IW` | `iw` on `PATH` | Absolute path, because systemd units get a minimal `PATH` |
+
+The stimulus setting is the *initial* one. With `CSI_CONTROL_URL` set, the web UI's WiFi view
+owns it from then on, and the node reports back what it actually applied.
 
 `csi_node.py` takes the same settings as flags; run it with `--help`. It can be run by hand
 against a Pi that is already configured for collection, which is the fastest way to try
