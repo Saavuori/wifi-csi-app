@@ -30,6 +30,13 @@ def settings(tmp_path) -> Settings:
     s.web_dir = None
     s.record = False
     s.history_s = 30.0
+    # These tests are about plumbing — that a frame reaches a ring, that a mask change clears
+    # history, that metrics come out at all — over scenes a few tens of seconds long. The
+    # shipped vitals defaults are a 60 s window behind a 90 s stability gate, which by design
+    # produces nothing at this timescale. Both are exercised properly in test_vitals.py.
+    s.breathing.window_s = 20.0
+    s.breathing.stability_window_s = 0.0
+    s.heart.stability_window_s = 0.0
     s.ensure_dirs()
     return s
 

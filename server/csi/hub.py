@@ -227,6 +227,11 @@ class NodeState:
         self.presence.recalibrate()
         if op == "reset":
             self.pre.reset()
+            # The vitals stability gate votes on a run of recent estimates. Those were measured
+            # on the link that just went away, so they are not evidence about the new one — kept,
+            # they would either mask a genuine change or veto a good signal for a window.
+            self.breathing.reset()
+            self.heart.reset()
             if self.ring is not None:
                 self.ring.clear()
 

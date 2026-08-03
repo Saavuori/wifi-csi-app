@@ -45,7 +45,8 @@ def test_status_reports_an_empty_system(client):
     body = client.get("/api/status").json()
     assert body["nodes"] == []
     assert body["counters"]["live_frames"] == 0
-    assert body["config"]["breathing"]["window_s"] == 20.0
+    # 60 s, not the 20 s the literature suggests: see VitalsConfig.breathing().
+    assert body["config"]["breathing"]["window_s"] == 60.0
 
 
 def test_status_reports_a_node_once_it_appears(client):
