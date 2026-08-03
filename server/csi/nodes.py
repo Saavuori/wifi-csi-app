@@ -170,7 +170,12 @@ class NodeHealth:
             "bad_packets": self.bad_packets,
             "rssi": self.rssi,
             "noise_floor": self.noise_floor,
-            "snr_db": self.rssi - self.noise_floor,
+            # None, not a number, when the driver reports no noise floor. `brcmfmac` on the Pi
+            # leaves the column empty and the node normalizes that to 0, so subtracting it
+            # produced an "SNR" that was RSSI with the sign flipped — -49 dB on a link that was
+            # working perfectly. A gap the UI can render as "—" is honest; a plausible-looking
+            # wrong number invites someone to tune against it.
+            "snr_db": self.rssi - self.noise_floor if self.noise_floor else None,
             "channel": self.channel,
             "n_sub": self.n_sub,
             "uptime_s": round(self.uptime_s, 1),
