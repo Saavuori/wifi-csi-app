@@ -138,6 +138,55 @@ export interface ServerConfig {
   };
 }
 
+/** An access point seen in a node's last WiFi scan. */
+export interface ScanAp {
+  bssid: string;
+  ssid: string;
+  freq: number;
+  channel: number;
+  width: number;
+  signal: number | null;
+  stations: number | null;
+  utilisation: number | null;
+  associated: boolean;
+}
+
+/** A transmitter a node has heard while capturing, from the frames themselves. */
+export interface Transmitter {
+  mac: string;
+  frames: number;
+  rssi: number;
+  channel: number;
+  last_seen: number;
+}
+
+/**
+ * One node's control picture: what the operator asked for (`desired`), what the node last said
+ * it applied (`applied`), and whether those agree yet. A node that never reports leaves
+ * `applied` null — the UI reads that as "this node does not take control" and shows it read-only.
+ */
+export interface NodeControl {
+  node_id: number;
+  desired: { channel: string; stimulus: "auto" | "always" | "off" };
+  revision: number;
+  scan_rev: number;
+  applied: {
+    channel?: string;
+    stimulus?: string;
+    narrowband?: boolean;
+    observed_channel?: number;
+    capabilities?: string[];
+  } | null;
+  reported_rev: number | null;
+  reported_ts: number | null;
+  scan: { ts: number; aps: ScanAp[] } | null;
+  reported_scan_rev: number | null;
+}
+
+export interface WifiNode extends NodeControl {
+  transmitters: Transmitter[];
+}
+
 export interface Layout {
   n_sub: number;
   name: string;
@@ -169,6 +218,7 @@ export type ServerEvent =
   | { type: "recording"; session: Session | null }
   | { type: "replay"; replay: ReplayState | null; session_id?: string }
   | { type: "config"; config: ServerConfig }
+  | { type: "node_control"; control: NodeControl }
   | { type: "recalibrated"; node_id: number | null }
   | { type: "pong"; t: number };
 

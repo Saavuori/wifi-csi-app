@@ -13,6 +13,7 @@ import type {
   ServerEvent,
   Session,
   Snapshot,
+  WifiNode,
   WorkerIn,
   WorkerOut,
 } from "./messages";
@@ -45,6 +46,7 @@ export class Store {
   readonly recording = new Signal<Session | null>(null);
   readonly replay = new Signal<ReplayState | null>(null);
   readonly sessions = new Signal<Session[]>([]);
+  readonly wifi = new Signal<WifiNode[]>([]);
   readonly rate = new Signal(0);
 
   private worker: Worker;
@@ -86,6 +88,37 @@ export class Store {
 
   recalibrate(nodeId: number | null) {
     this.send({ kind: "send", message: { type: "recalibrate", node_id: nodeId } });
+  }
+
+  /** Fetch the WiFi overview: control state, last scan and heard transmitters, per node. */
+  async refreshWifi() {
+    try {
+      const response = await fetch("/api/wifi");
+      const body = (await response.json()) as { nodes: WifiNode[] };
+      this.wifi.set(body.nodes);
+    } catch {
+      // Offline. The caller polls, and the next tick will pick it up.
+    }
+  }
+
+  /** Change a node's desired channel and/or stimulus mode. Returns the server's echo. */
+  async patchNodeControl(
+    nodeId: number,
+    patch: { channel?: string; stimulus?: "auto" | "always" | "off" },
+  ) {
+    const response = await fetch(`/api/nodes/${nodeId}/control`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    if (!response.ok) throw new Error(`control patch failed: ${response.status}`);
+    await this.refreshWifi();
+  }
+
+  /** Ask a node to run a WiFi scan on its next poll. */
+  async requestScan(nodeId: number) {
+    await fetch(`/api/nodes/${nodeId}/control/scan`, { method: "POST" });
+    await this.refreshWifi();
   }
 
   private send(message: WorkerIn) {
@@ -132,6 +165,11 @@ export class Store {
         break;
       case "config":
         this.config.set(event.config);
+        break;
+      case "node_control":
+        // A control change (from this browser or another) landed. Re-pull the overview so the
+        // desired/applied/pending picture and the scan results stay current without a poll.
+        void this.refreshWifi();
         break;
       default:
         break;

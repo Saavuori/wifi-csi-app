@@ -61,6 +61,10 @@ SERVICE="/etc/systemd/system/csi-node.service"
 
 SERVER=""
 PORT="${CSI_UDP_PORT:-5566}"
+# The server's HTTP API, which the node polls for channel and stimulus control. Defaults to the
+# server host on this port; the control loop is disabled only if this ends up empty.
+HTTP_PORT="${CSI_HTTP_PORT:-8080}"
+CONTROL_URL="${CSI_CONTROL_URL:-}"
 NODE_ID="${CSI_NODE_ID:-20}"
 IFACE="${CSI_IFACE:-wlan0}"
 AP_MAC=""
@@ -102,6 +106,8 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --server)     SERVER="${2:?--server needs a host}"; shift ;;
         --port)       PORT="${2:?--port needs a number}"; shift ;;
+        --http-port)  HTTP_PORT="${2:?--http-port needs a number}"; shift ;;
+        --control-url) CONTROL_URL="${2:?--control-url needs a URL}"; shift ;;
         --node-id)    NODE_ID="${2:?--node-id needs a number}"; shift ;;
         --iface)      IFACE="${2:?--iface needs a name}"; shift ;;
         --ap)         AP_MAC="${2:?--ap needs a MAC}"; shift ;;
@@ -578,6 +584,12 @@ install_service() {
     [ -x "$connect" ] || [ -f "$connect" ] || die "missing $connect — was the fork cloned?"
     chmod +x "$connect" 2>/dev/null || true
 
+    # Absolute path baked into the helpers and the env file: systemd units run with a minimal
+    # PATH, and the control loop's scan needs `iw` by a path it can count on.
+    local iw
+    iw="$(command -v iw || true)"
+    [ -n "$iw" ] || iw="/usr/sbin/iw"
+
     if [ -z "$AP_MAC" ]; then
         AP_MAC="$(detect_ap || true)"
     fi
@@ -605,6 +617,31 @@ install_service() {
     if [ -z "$SERVER" ]; then
         SERVER="127.0.0.1"
     fi
+    # Default the control URL to the server's HTTP port. When the server is on this Pi (the
+    # one-command install) that is loopback; when it is elsewhere, the same host the frames go
+    # to. Leaving CONTROL_URL empty disables the control loop, which is what an old server or a
+    # deliberately read-only node wants.
+    if [ -z "$CONTROL_URL" ]; then
+        CONTROL_URL="http://$SERVER:$HTTP_PORT"
+    fi
+
+    # Retunes the extractor to an explicit channel, unfiltered. Separate from capture-up.sh,
+    # which follows the association: an explicit channel is exactly the case where the node is
+    # deliberately not measuring its own link. Written as a wrapper for the same reason the
+    # others are — systemd is not the only caller now, the control loop invokes it too.
+    cat > "$PREFIX/bin/tune.sh" <<EOF
+#!/bin/sh
+# Tune the nexmon extractor to an explicit CH/BW (e.g. 36/80). Written by pi/install-node.sh.
+set -eu
+. /etc/default/csi-node
+CHANNEL="\${1:?tune.sh needs a channel like 36/80}"
+CH="\${CHANNEL%%/*}"
+BW="\${CHANNEL##*/}"
+"$iw" dev "\$CSI_IFACE" set channel "\$CH" 2>/dev/null || \\
+    "$iw" dev "\$CSI_IFACE" set freq "\$CH" 2>/dev/null || true
+exec "\$CSI_CONNECT_SH" -i "\$CSI_IFACE" -C 0x1 -N 0x1 --unfiltered
+EOF
+    chmod 0755 "$PREFIX/bin/tune.sh"
 
     cat > "$ENV_FILE" <<EOF
 # Written by pi/install-node.sh. Edit and 'systemctl restart csi-node' to change.
@@ -618,6 +655,12 @@ CSI_STIMULUS=$STIMULUS
 CSI_STIMULUS_IFACE=$STIMULUS_IFACE
 CSI_STIMULUS_HZ=$STIMULUS_HZ
 CSI_CONNECT_SH=$connect
+# Control: the node polls this for channel and stimulus changes from the web UI, and reports
+# what it applied. Blank it out to make this node read-only.
+CSI_CONTROL_URL=$CONTROL_URL
+CSI_TUNE_SH=$PREFIX/bin/tune.sh
+CSI_CAPTURE_UP_SH=$PREFIX/bin/capture-up.sh
+CSI_IW=$iw
 EOF
     chmod 0644 "$ENV_FILE"
 
