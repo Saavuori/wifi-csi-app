@@ -23,7 +23,18 @@
 // OffscreenCanvas. Steps 1-3 remove essentially all of the pain; that one is the follow-up.
 
 import { colormap, colormapGradient, type ColormapName } from "../lib/colormap";
-import { el, fitCanvas, hintBlock, select, slider, toggle, viewLayout } from "../lib/dom";
+import {
+  ICONS,
+  el,
+  fitCanvas,
+  fullscreen,
+  hintBlock,
+  icon,
+  select,
+  slider,
+  toggle,
+  viewLayout,
+} from "../lib/dom";
 import type { FrameBatch, Metrics } from "../lib/messages";
 import { store } from "../lib/store";
 import type { View } from "./view";
@@ -333,30 +344,55 @@ export function waterfallView(): View {
   const legend = el("div", { class: "legend-bar" });
   legend.style.background = colormapGradient(options.colormap);
 
+  // The button's glyph and label track the real state rather than a local boolean, because the
+  // user can leave fullscreen by pressing Escape or with a system gesture that never reaches us.
+  const expandIcon = el("span", { class: "expand-icon" }, icon(ICONS.expand));
+  const expandLabel = el("span", { class: "button-label" }, "Fullscreen");
+  const expandButton = el(
+    "button",
+    {
+      class: "button button-small waterfall-expand",
+      type: "button",
+      title: "Fill the screen with the waterfall",
+      "aria-pressed": "false",
+    },
+    expandIcon,
+    expandLabel,
+  );
+
+  const plot = el(
+    "div",
+    { class: "panel panel-grow waterfall-panel" },
+    el(
+      "div",
+      { class: "panel-head" },
+      el("h2", {}, "Waterfall"),
+      el("div", { class: "spacer" }),
+      el("div", { class: "panel-note" }, status),
+      expandButton,
+    ),
+    el(
+      "div",
+      { class: "waterfall-frame" },
+      el("div", { class: "waterfall-canvases" }, canvas, overlay),
+      // Column on the desktop, a strip under the plot on a phone — where a 34 px-wide bar
+      // would cost a tenth of the width the waterfall spends on time.
+      el("div", { class: "legend" }, el("span", {}, "high"), legend, el("span", {}, "low")),
+    ),
+  );
+
+  const screen = fullscreen(plot, (on) => {
+    expandIcon.replaceChildren(icon(on ? ICONS.collapse : ICONS.expand));
+    expandLabel.textContent = on ? "Exit" : "Fullscreen";
+    expandButton.setAttribute("aria-pressed", on ? "true" : "false");
+    expandButton.title = on ? "Leave fullscreen (Esc)" : "Fill the screen with the waterfall";
+  });
+  expandButton.addEventListener("click", () => void screen.toggle());
+
   const root = viewLayout({
     className: "view-waterfall",
     controlsTitle: "Display",
-    main: [
-      el(
-        "div",
-        { class: "panel panel-grow" },
-        el(
-          "div",
-          { class: "panel-head" },
-          el("h2", {}, "Waterfall"),
-          el("div", { class: "spacer" }),
-          el("div", { class: "panel-note" }, status),
-        ),
-        el(
-          "div",
-          { class: "waterfall-frame" },
-          el("div", { class: "waterfall-canvases" }, canvas, overlay),
-          // Column on the desktop, a strip under the plot on a phone — where a 34 px-wide bar
-          // would cost a tenth of the width the waterfall spends on time.
-          el("div", { class: "legend" }, el("span", {}, "high"), legend, el("span", {}, "low")),
-        ),
-      ),
-    ],
+    main: [plot],
     side: [
       el(
         "div",
@@ -389,6 +425,10 @@ export function waterfallView(): View {
       unsubscribeFrames?.();
       unsubscribeMetrics?.();
       queue = [];
+      // Navigating away with the plot still expanded would otherwise strand the class on the
+      // document — the same failure the sheets avoid by closing on navigation. Not disposed:
+      // this view instance is reused for the life of the app and will be mounted again.
+      if (screen.active()) void screen.toggle();
     },
   };
 }

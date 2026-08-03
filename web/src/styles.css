@@ -1313,6 +1313,63 @@ input[type="range"] {
   color: var(--dim);
 }
 
+/* -- fullscreen waterfall ------------------------------------------------------------------ */
+
+/* Two ways in, one appearance. `:fullscreen` covers the Fullscreen API; `.is-fullscreen` is set
+   by both paths, and on iOS — where the API does not apply to anything but a <video> — it is the
+   only one that fires. A phone is exactly where the extra pixels are worth most, so the fallback
+   is not an afterthought. */
+
+.waterfall-panel.is-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  margin: 0;
+  border-radius: 0;
+  border: none;
+  /* Above the tab bar, and clear of the notch on a phone held sideways. */
+  padding: max(var(--s3), var(--safe-b)) max(var(--s3), var(--safe-r))
+    max(var(--s3), var(--safe-b)) max(var(--s3), var(--safe-l));
+}
+
+.waterfall-panel:fullscreen {
+  background: var(--bg);
+  padding: var(--s3);
+}
+
+/* The plot is the point of being fullscreen: let it take everything the head does not. */
+.waterfall-panel.is-fullscreen > .waterfall-frame,
+.waterfall-panel:fullscreen > .waterfall-frame {
+  flex: 1;
+  min-height: 0;
+}
+
+/* The tab bar and sidebar would otherwise sit on top of a fixed-position panel. */
+html.has-fullscreen .tabbar,
+html.has-fullscreen .nav,
+html.has-fullscreen .header,
+html.has-fullscreen .tune {
+  display: none;
+}
+
+.waterfall-expand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  flex: none;
+}
+
+.expand-icon {
+  display: inline-flex;
+}
+
+/* On a narrow screen the glyph carries it; the word costs width the status line wants. */
+@media (max-width: 520px) {
+  .waterfall-expand .button-label {
+    display: none;
+  }
+}
+
 /* -- wifi overview ----------------------------------------------------------------------- */
 
 .wifi-list {
