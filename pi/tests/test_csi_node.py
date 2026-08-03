@@ -1040,3 +1040,44 @@ def test_node_counts_both_classes_for_the_follower():
 
     assert node.narrowband_seen == 1
     assert node.wideband_seen == 1
+
+
+# -- recovering from a firmware that stopped delivering ------------------------------------
+
+from csi_node import CaptureWatchdog  # noqa: E402
+
+
+def test_watchdog_does_not_fire_while_frames_arrive():
+    w = CaptureWatchdog(stall_s=90.0, cooldown_s=120.0)
+    assert w.should_rearm(0.0) is False  # starts the clock
+    for t in range(10, 400, 10):
+        w.note_frame(float(t))
+        assert w.should_rearm(float(t)) is False
+    assert w.rearms == 0
+
+
+def test_watchdog_fires_once_the_stall_passes():
+    w = CaptureWatchdog(stall_s=90.0, cooldown_s=120.0)
+    w.should_rearm(0.0)
+    w.note_frame(10.0)
+    assert w.should_rearm(80.0) is False   # 70s of silence, not yet
+    assert w.should_rearm(150.0) is True   # 140s
+    assert w.rearms == 1
+
+
+def test_watchdog_respects_its_cooldown():
+    """A genuinely silent channel must not turn into a re-arm loop."""
+    w = CaptureWatchdog(stall_s=90.0, cooldown_s=120.0)
+    w.should_rearm(0.0)
+    w.note_frame(10.0)
+    assert w.should_rearm(150.0) is True
+    assert w.should_rearm(250.0) is False  # inside the cooldown
+    assert w.should_rearm(400.0) is True
+    assert w.rearms == 2
+
+
+def test_watchdog_waits_a_cooldown_before_its_first_verdict():
+    """A slow start is not a stall: nothing has arrived yet because nothing has been asked for."""
+    w = CaptureWatchdog(stall_s=10.0, cooldown_s=120.0)
+    assert w.should_rearm(0.0) is False
+    assert w.should_rearm(60.0) is False

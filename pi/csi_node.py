@@ -835,6 +835,49 @@ class RateGate:
         return self.armed
 
 
+class CaptureWatchdog:
+    """Decides when to re-apply the extractor configuration because frames have stopped.
+
+    nexmon's collection flag keeps reading back as 1 long after the firmware has quietly given
+    up delivering. Observed on hardware: station still associated to the right BSSID, chanspec
+    still 36/80, `csi_collect` still 1, and not one packet on the capture socket for hours.
+    Every status field a person would think to check said healthy. Re-running the extractor
+    setup brings it straight back.
+
+    Nothing here can tell that apart from a genuinely idle channel, and it does not need to:
+    re-arming an extractor that was already working costs one ioctl and a frame or two. Doing
+    nothing when the radio has silently stopped costs the whole measurement, which is the
+    asymmetry this is built around. The cooldown is what keeps a truly quiet channel from
+    turning into a re-arm loop.
+    """
+
+    def __init__(self, *, stall_s: float = 90.0, cooldown_s: float = 120.0) -> None:
+        self.stall_s = stall_s
+        self.cooldown_s = cooldown_s
+        self.rearms = 0
+        self._last_frame_at: float | None = None
+        self._next_allowed = 0.0
+
+    def note_frame(self, now: float) -> None:
+        self._last_frame_at = now
+
+    def should_rearm(self, now: float) -> bool:
+        if self._last_frame_at is None:
+            # Nothing has ever arrived; start the clock at the first check rather than at zero,
+            # so a slow start is not immediately read as a stall.
+            self._last_frame_at = now
+            self._next_allowed = now + self.cooldown_s
+            return False
+        if now - self._last_frame_at < self.stall_s or now < self._next_allowed:
+            return False
+        self.rearms += 1
+        self._next_allowed = now + self.cooldown_s
+        # Treated as if a frame arrived, so the next decision is measured from the re-arm
+        # rather than firing again on the same silence.
+        self._last_frame_at = now
+        return True
+
+
 class ClassFollower:
     """Picks the frame class a *passive* node should measure, from what is actually arriving.
 
@@ -1410,6 +1453,8 @@ def run(args: argparse.Namespace) -> int:
     follower = ClassFollower(
         window_s=args.stimulus_window, dwell_s=args.stimulus_dwell
     )
+    watchdog = CaptureWatchdog(stall_s=args.stall_s) if args.stall_s > 0 else None
+    capture_up = os.environ.get("CSI_CAPTURE_UP_SH", "")
 
     bad = 0
     unstamped = 0
@@ -1458,6 +1503,11 @@ def run(args: argparse.Namespace) -> int:
                             )
                         unstamped += 1
 
+                    if watchdog is not None:
+                        # Any decodable nexmon packet counts, forwarded or not: the question is
+                        # whether the firmware is still delivering, not whether this node likes
+                        # the frame's class.
+                        watchdog.note_frame(now)
                     datagram = node.on_packet(pkt, capture_us)
                     if datagram is not None:
                         # From the datagram rather than from the packet, because a trimmed frame
@@ -1465,6 +1515,22 @@ def run(args: argparse.Namespace) -> int:
                         # wants to know what is actually being sent.
                         n_sub = (len(datagram) - _WIRE_HEADER.size) // 2
                         out.sendto(datagram, server)
+
+            if watchdog is not None and watchdog.should_rearm(now):
+                if capture_up:
+                    log.warning(
+                        "no frames for %gs while the radio looks healthy; re-applying the "
+                        "extractor configuration (re-arm %d)", watchdog.stall_s, watchdog.rearms,
+                    )
+                    try:
+                        _run_command([capture_up], timeout_s=60.0)
+                    except (subprocess.SubprocessError, OSError) as exc:
+                        log.error("could not re-arm the extractor: %s", exc)
+                else:
+                    log.warning(
+                        "no frames for %gs and CSI_CAPTURE_UP_SH is not set, so the extractor "
+                        "cannot be re-armed from here", watchdog.stall_s,
+                    )
 
             mode = control.stimulus_mode
             if stimulus is not None:
@@ -1603,6 +1669,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--control-poll", type=float,
                    default=float(os.environ.get("CSI_CONTROL_POLL", "3")),
                    help="seconds between control polls (default 3)")
+    p.add_argument("--stall-s", type=float,
+                   default=float(os.environ.get("CSI_STALL_S", "90")),
+                   help="re-apply the extractor configuration after this many seconds with no "
+                        "frames, 0 to disable (default 90). nexmon stops delivering while still "
+                        "reporting csi_collect=1; this is what recovers from that.")
     p.add_argument("--rssi-interval", type=float, default=1.0,
                    help="seconds between /proc/net/wireless reads (default 1)")
     p.add_argument("--status-interval", type=float, default=10.0,
