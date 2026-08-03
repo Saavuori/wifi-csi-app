@@ -49,6 +49,7 @@ from .recorder import Recorder
 from .replay import Replayer
 from .ring import FrameRing, History, Window
 from .sessions import SessionStore
+from .version import build_info
 
 log = logging.getLogger("csi.hub")
 
@@ -645,6 +646,9 @@ class Hub:
         n_sub = next((s.ring.n_sub for s in self.nodes.values() if s.ring), 0)
         return {
             "uptime_s": round(time.time() - self.started_at, 1),
+            # In the snapshot as well as on /api/version: the browser gets it with the state it
+            # already fetches, so "which build am I looking at" never costs a second request.
+            "build": build_info(),
             "nodes": self.node_report(),
             "layout": (
                 describe(

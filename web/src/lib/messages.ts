@@ -197,8 +197,16 @@ export interface Layout {
   k: number[];
 }
 
+/** Which build the server is running. `commit` and `built_at` are empty for a dev build. */
+export interface BuildInfo {
+  version: string;
+  commit: string;
+  built_at: string;
+}
+
 export interface Snapshot {
   uptime_s: number;
+  build: BuildInfo;
   nodes: NodeHealth[];
   layout: Layout | null;
   recording: Session | null;

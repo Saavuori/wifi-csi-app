@@ -290,3 +290,49 @@ def test_a_bad_subscribe_message_does_not_close_the_websocket(client):
         while True:
             if json.loads(ws.receive_text())["type"] == "pong":
                 break
+
+
+# -- build identity ------------------------------------------------------------------------
+
+
+def test_version_endpoint_reports_a_build(client):
+    body = client.get("/api/version").json()
+    assert set(body) == {"version", "commit", "built_at"}
+    # Nothing is injected in a test run, so this is the honest fallback rather than a number.
+    assert body["version"]
+
+
+def test_status_carries_the_same_build(client):
+    status = client.get("/api/status").json()
+    assert status["build"] == client.get("/api/version").json()
+
+
+def test_build_info_prefers_the_environment(monkeypatch):
+    """A container knows what it was built from; installed metadata only knows what the file
+    said at the time."""
+    from csi import version as version_module
+
+    version_module.build_info.cache_clear()
+    monkeypatch.setenv("CSI_VERSION", "9.9.9")
+    monkeypatch.setenv("CSI_COMMIT", "abc1234def")
+    try:
+        info = version_module.build_info()
+        assert info["version"] == "9.9.9"
+        assert version_module.version_string() == "9.9.9 (abc1234)"
+    finally:
+        version_module.build_info.cache_clear()
+
+
+def test_unset_build_args_do_not_become_a_version(monkeypatch):
+    """`--build-arg` leaves the literal placeholder behind when a caller passes nothing."""
+    from csi import version as version_module
+
+    version_module.build_info.cache_clear()
+    monkeypatch.setenv("CSI_VERSION", "unknown")
+    monkeypatch.setenv("CSI_COMMIT", "")
+    try:
+        info = version_module.build_info()
+        assert info["version"] != "unknown"
+        assert info["commit"] == ""
+    finally:
+        version_module.build_info.cache_clear()

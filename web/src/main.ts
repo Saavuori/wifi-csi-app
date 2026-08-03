@@ -79,6 +79,10 @@ const connectionDot = el("span", { class: "dot dot-bad" });
 // information in a fifth of the width.
 const connectionLabel = el("span", { class: "connection-text" }, "connecting");
 const rateLabel = el("span", { class: "header-metric" }, "");
+// Which build is on screen. Small and dim: it is the answer to a question that is only asked
+// occasionally, but the alternative is guessing from a container that has been up for a month.
+// The title carries the commit and build date, which are what a bug report actually needs.
+const buildLabel = el("span", { class: "brand-build" }, "");
 const sourceLabel = el("span", { class: "pill header-source" }, "");
 
 let active: View | null = null;
@@ -209,6 +213,7 @@ const header = el(
     { class: "brand" },
     el("span", { class: "brand-mark" }, "CSI"),
     el("span", { class: "brand-text" }, "WiFi sensing"),
+    buildLabel,
   ),
   el("div", { class: "spacer" }),
   el(
@@ -231,6 +236,15 @@ document.getElementById("app")?.append(header, el("div", { class: "layout" }, na
 store.connected.subscribe((connected) => {
   connectionDot.className = `dot dot-${connected ? "good" : "bad"}`;
   connectionLabel.textContent = connected ? "connected" : "reconnecting";
+});
+store.build.subscribe((build) => {
+  if (build === null) return;
+  buildLabel.textContent = build.version;
+  const detail = [
+    build.commit ? `commit ${build.commit.slice(0, 12)}` : null,
+    build.built_at ? `built ${build.built_at}` : null,
+  ].filter(Boolean);
+  buildLabel.title = detail.length > 0 ? detail.join(" · ") : "development build";
 });
 store.nodes.subscribe(renderNodes);
 store.selectedNode.subscribe(() => renderNodes(store.nodes.value), false);

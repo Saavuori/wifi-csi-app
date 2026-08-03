@@ -17,6 +17,7 @@ from .echo import start_echo
 from .hub import Client, Hub
 from .ingest import start_listener
 from .recorder import scan_recording
+from .version import build_info
 
 log = logging.getLogger("csi.api")
 
@@ -63,6 +64,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/healthz")
     async def healthz() -> dict:
         return {"ok": True, "uptime_s": hub.snapshot()["uptime_s"]}
+
+    @app.get("/api/version")
+    async def version() -> dict:
+        return build_info()
 
     # -- config ---------------------------------------------------------------------------
 

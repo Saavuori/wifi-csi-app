@@ -107,11 +107,29 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable={{is_default_branch}}
 
+      # What the running server reports on /api/version and shows in the header. A tag build
+      # takes its version from the tag; anything else is labelled with the branch and short
+      # SHA, so an image someone pulled off a feature branch never claims to be a release.
+      - id: build-info
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            version="${GITHUB_REF#refs/tags/v}"
+          else
+            version="0.0.0-${GITHUB_REF_NAME//\//-}.${GITHUB_SHA::7}"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - uses: docker/build-push-action@v6
         with:
           context: .
           file: deploy/Containerfile
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            CSI_VERSION=${{ steps.build-info.outputs.version }}
+            CSI_COMMIT=${{ github.sha }}
+            CSI_BUILT_AT=${{ steps.build-info.outputs.built_at }}
           # A pull request builds to prove the Containerfile still works, and publishes
           # nothing. Everything else publishes under its own branch or version tag; `latest`
           # only ever moves on the default branch.

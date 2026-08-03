@@ -5,6 +5,7 @@
 // subcarrier lines) keep their own history in a shape suited to how they draw.
 
 import type {
+  BuildInfo,
   FrameBatch,
   Metrics,
   NodeHealth,
@@ -48,6 +49,7 @@ export class Store {
   readonly sessions = new Signal<Session[]>([]);
   readonly wifi = new Signal<WifiNode[]>([]);
   readonly rate = new Signal(0);
+  readonly build = new Signal<BuildInfo | null>(null);
 
   private worker: Worker;
   private frameListeners = new Set<Listener<FrameBatch>>();
@@ -178,6 +180,7 @@ export class Store {
 
   private applySnapshot(snapshot: Snapshot) {
     this.setNodes(snapshot.nodes);
+    if (snapshot.build) this.build.set(snapshot.build);
     this.config.set(snapshot.config);
     this.recording.set(snapshot.recording);
     this.replay.set(snapshot.replay);

@@ -1313,6 +1313,22 @@ input[type="range"] {
   color: var(--dim);
 }
 
+.brand-build {
+  font-family: var(--mono);
+  font-size: var(--t-micro);
+  color: var(--dim);
+  align-self: center;
+  padding-left: var(--s1);
+}
+
+/* The version is the first thing to lose when the header gets tight — the phone layout already
+   drops the word "WiFi sensing" beside it for the same reason. */
+@media (max-width: 520px) {
+  .brand-build {
+    display: none;
+  }
+}
+
 /* -- fullscreen waterfall ------------------------------------------------------------------ */
 
 /* Two ways in, one appearance. `:fullscreen` covers the Fullscreen API; `.is-fullscreen` is set

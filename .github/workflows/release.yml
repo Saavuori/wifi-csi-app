@@ -1,0 +1,132 @@
+name: release
+
+# Cuts a release when a pull request merges into main, using the release type that PR declared.
+#
+# The version lives in git tags. `server/pyproject.toml` and `web/package.json` are updated to
+# match so an installed package reports the same number, but the tag is what is authoritative —
+# it is the thing the image build reads (ci.yml already tags `type=semver` from it) and the only
+# record that survives someone editing a file by hand.
+#
+# Triggered on the merge rather than on the tag, because the PR is where the release type is
+# written down and a tag carries no such information.
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      type:
+        description: "Release type to force"
+        required: true
+        type: choice
+        options: [major, minor, patch]
+
+permissions:
+  contents: write
+
+concurrency:
+  # Never two releases at once: both would compute the same "next" version from the same tag.
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: version and tag
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history and tags: the next version is computed from the last one.
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Work out the next version
+        id: next
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { resolve, bump } = require('./.github/scripts/release-type.js');
+            const { execSync } = require('child_process');
+
+            let type;
+            if (context.eventName === 'workflow_dispatch') {
+              type = context.payload.inputs.type;
+              core.info(`release type ${type}, forced by workflow_dispatch`);
+            } else {
+              const pr = context.payload.pull_request;
+              const result = resolve({
+                labels: pr.labels.map((l) => l.name),
+                title: pr.title,
+                body: pr.body || '',
+              });
+              if (result.error) {
+                // The PR check should have caught this long before the merge. If it somehow
+                // did not, refusing is better than guessing at someone's intent.
+                core.setFailed(`Cannot release: ${result.error}`);
+                return;
+              }
+              type = result.type;
+              core.info(`release type ${type}, from ${result.source}`);
+            }
+
+            if (type === 'skip') {
+              core.info('This PR is marked release:skip — nothing to release.');
+              core.setOutput('skip', 'true');
+              return;
+            }
+
+            // Latest tag by version order, not by date: a patch on an old branch must not be
+            // read as the newest release.
+            const tags = execSync('git tag --list "v*" --sort=-v:refname')
+              .toString().trim().split('\n').filter(Boolean);
+            const current = tags.length > 0 ? tags[0] : 'v0.0.0';
+            const version = bump(current, type);
+
+            core.info(`${current} -> v${version}`);
+            core.setOutput('skip', 'false');
+            core.setOutput('type', type);
+            core.setOutput('previous', current);
+            core.setOutput('version', version);
+            core.setOutput('tag', `v${version}`);
+
+      - name: Update the version files and changelog
+        if: steps.next.outputs.skip == 'false'
+        env:
+          VERSION: ${{ steps.next.outputs.version }}
+          PREVIOUS: ${{ steps.next.outputs.previous }}
+          RELEASE_TYPE: ${{ steps.next.outputs.type }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          python .github/scripts/apply_version.py
+
+      - name: Commit, tag and push
+        if: steps.next.outputs.skip == 'false'
+        env:
+          TAG: ${{ steps.next.outputs.tag }}
+          VERSION: ${{ steps.next.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add server/pyproject.toml web/package.json CHANGELOG.md
+          git commit -m "Release ${TAG}" -m "[skip ci]"
+          git tag -a "${TAG}" -m "Release ${TAG}"
+          # The tag push is what triggers ci.yml to build and publish the versioned image.
+          git push origin HEAD:main
+          git push origin "${TAG}"
+
+      - name: Create the GitHub release
+        if: steps.next.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.next.outputs.tag }}
+          PREVIOUS: ${{ steps.next.outputs.previous }}
+        run: |
+          set -euo pipefail
+          NOTES=$(python .github/scripts/apply_version.py --notes-only)
+          gh release create "$TAG" --title "$TAG" --notes "$NOTES"

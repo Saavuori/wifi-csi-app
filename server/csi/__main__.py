@@ -26,6 +26,12 @@ def main() -> None:
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
 
+    # First line in the log, so a journal from a node that has been up for a month still says
+    # which build produced everything under it.
+    from .version import version_string
+
+    logging.getLogger("csi").info("WiFi CSI server %s", version_string())
+
     settings = Settings()
     if args.http_port is not None:
         settings.http_port = args.http_port
