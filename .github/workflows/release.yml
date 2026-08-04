@@ -125,7 +125,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.next.outputs.tag }}
+          # apply_version.py needs the same environment here as it did above. Passing only TAG
+          # and PREVIOUS left VERSION unset, and the script exits on that — after the tag had
+          # already been pushed, so v0.1.0 existed with no release attached to it.
+          VERSION: ${{ steps.next.outputs.version }}
           PREVIOUS: ${{ steps.next.outputs.previous }}
+          RELEASE_TYPE: ${{ steps.next.outputs.type }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
           NOTES=$(python .github/scripts/apply_version.py --notes-only)
