@@ -16,6 +16,15 @@ Versions are `MAJOR.MINOR.PATCH`:
 The git tag is authoritative. `server/pyproject.toml` and `web/package.json` are updated to
 match, and the running server reports the same number on `/api/version` and in the header.
 
+## v0.1.3 — 2026-08-04
+
+fix: one Vitals entry in the sidebar, not two (#31)
+
+### Changes
+- fix: one Vitals entry in the sidebar, not two
+
+Release type: **patch** (v0.1.2 → v0.1.3)
+
 ## v0.1.2 — 2026-08-04
 
 fix: measure what the app claims, and fix what the measurement found (#29)
