@@ -44,6 +44,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # The branch, named, rather than whatever this event checks out by default. On a
+          # pull_request event that default is `refs/pull/N/merge`, and the release commit is
+          # pushed on top of it — which is a fast-forward only because a merge-commit merge
+          # leaves that ref pointing at the commit now on main. Squash and rebase merges are
+          # both enabled on this repo, and either one makes the merge ref an ephemeral commit
+          # that is not a descendant of the branch tip: the push is rejected, and the release
+          # quietly does not happen. Checking out the branch removes the dependence on how the
+          # button was pressed.
+          #
+          # Resolved from the event rather than hardcoded, like pages.yml, so that renaming the
+          # default branch does not silently stop releases.
+          ref: ${{ github.event.repository.default_branch }}
           # Full history and tags: the next version is computed from the last one.
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -114,6 +126,7 @@ jobs:
         env:
           TAG: ${{ steps.next.outputs.tag }}
           VERSION: ${{ steps.next.outputs.version }}
+          BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -124,7 +137,12 @@ jobs:
           # This push triggers nothing — a push made with GITHUB_TOKEN never starts a workflow
           # run. That is why the image is built by the job below rather than by ci.yml noticing
           # the tag.
-          git push origin HEAD:main
+          #
+          # The branch first, the tag second. If someone else lands a commit between the
+          # checkout and here the branch push is rejected, `set -e` stops, and no tag is
+          # created — a release that did not happen, rather than a tag naming a commit that is
+          # on no branch.
+          git push origin "HEAD:${BRANCH}"
           git push origin "${TAG}"
 
       - name: Create the GitHub release
