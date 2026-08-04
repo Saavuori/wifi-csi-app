@@ -16,6 +16,22 @@ Versions are `MAJOR.MINOR.PATCH`:
 The git tag is authoritative. `server/pyproject.toml` and `web/package.json` are updated to
 match, and the running server reports the same number on `/api/version` and in the header.
 
+## v0.1.2 — 2026-08-04
+
+fix: measure what the app claims, and fix what the measurement found (#29)
+
+### Changes
+- fix: make eval_breathing actually able to produce a number
+- fix: refresh the sessions list when retention deletes something
+- fix: judge a vitals estimate by the number that actually tracks correctness
+- feat: bound the recordings directory so the appliance does not fill its own boot card
+- fix: three quiet wrongnesses found while auditing the rest
+- fix: make the stability tolerance mean the same thing in both bands, and stop a flaky test
+- fix: stop publishing a breathing rate the data does not support
+- fix: measure breathing against real CSI instead of against our own simulator
+
+Release type: **patch** (v0.1.1 → v0.1.2)
+
 ## v0.1.1 — 2026-08-04
 
 fix: give the release-notes step the environment it needs (#28)
