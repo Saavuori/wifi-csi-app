@@ -78,6 +78,20 @@ class Settings:
     # deleted to stay under this — see SessionStore.prune.
     max_disk_gb: float = field(default_factory=lambda: _env_float("CSI_MAX_DISK_GB", 8.0))
 
+    # Age limit on recordings, in hours; 0 disables. What is actually wanted from a monitor left
+    # running is the recent past — a recording from last week answers no question anyone asks of
+    # it, and on an SD card it costs write endurance to keep. This is the retention rule that
+    # matches how the thing is used; `max_disk_gb` stays as a backstop for a node that writes
+    # faster than expected.
+    max_age_h: float = field(default_factory=lambda: _env_float("CSI_MAX_AGE_H", 24.0))
+
+    # How often the always-on `live` recording is closed and reopened, in hours; 0 disables.
+    # Without this, `record` produces one session that is never finished and so can never age
+    # out: an age limit keyed on when a recording ended has nothing to key on, and the size
+    # prune spares the file being written. Rolling turns the past into finished sessions that
+    # retention can treat like any other.
+    roll_h: float = field(default_factory=lambda: _env_float("CSI_ROLL_H", 1.0))
+
     # A node that says nothing for this long is reported offline.
     node_timeout_s: float = field(default_factory=lambda: _env_float("CSI_NODE_TIMEOUT_S", 5.0))
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -240,6 +242,170 @@ def test_total_bytes_reads_the_disk_not_the_metadata(tmp_path):
     assert store.total_bytes() == 2048
 
 
+def _finished(store, label: str, size: int, started_at: float, ended_at: float):
+    session = _write_session(store, label, size)
+    session.started_at, session.ended_at = started_at, ended_at
+    session.frames = 1000
+    store.update(session)
+    return session
+
+
+def test_age_prune_deletes_only_what_is_wholly_outside_the_window(tmp_path):
+    from csi.sessions import SessionStore
+
+    store = SessionStore(tmp_path)
+    now = 100_000.0
+    day = 24 * 3600.0
+    stale = _finished(store, "stale", 1000, now - 3 * day, now - 2 * day)
+    recent = _finished(store, "recent", 1000, now - 3600.0, now - 60.0)
+
+    removed = store.prune_older_than(day, now=now)
+
+    assert removed == [stale.id]
+    assert store.get(recent.id) is not None
+
+
+def test_age_prune_measures_from_the_end_of_a_recording(tmp_path):
+    """An overnight run is kept while any of it is still inside the window."""
+    from csi.sessions import SessionStore
+
+    store = SessionStore(tmp_path)
+    now = 100_000.0
+    day = 24 * 3600.0
+    # Started 30 h ago, ended 22 h ago: outside the window by start, inside it by end.
+    overnight = _finished(store, "overnight", 1000, now - 30 * 3600.0, now - 22 * 3600.0)
+
+    assert store.prune_older_than(day, now=now) == []
+    assert store.get(overnight.id) is not None
+
+
+def test_age_prune_spares_the_session_being_written(tmp_path):
+    from csi.sessions import SessionStore
+
+    store = SessionStore(tmp_path)
+    now = 100_000.0
+    active = _write_session(store, "active", 1000)
+    active.started_at, active.ended_at = now - 5 * 24 * 3600.0, None
+    store.update(active)
+
+    assert store.prune_older_than(24 * 3600.0, keep=active, now=now) == []
+    assert store.get(active.id) is not None
+
+
+def test_age_prune_expires_a_session_left_unfinished_by_a_crash(tmp_path):
+    """No `ended_at` and not the one being written: it must not become immortal."""
+    from csi.sessions import SessionStore
+
+    store = SessionStore(tmp_path)
+    now = 100_000.0
+    orphan = _write_session(store, "orphan", 1000)
+    orphan.started_at, orphan.ended_at = now - 5 * 24 * 3600.0, None
+    store.update(orphan)
+
+    assert store.prune_older_than(24 * 3600.0, now=now) == [orphan.id]
+
+
+def test_age_prune_disabled_by_a_zero_window(tmp_path):
+    from csi.sessions import SessionStore
+
+    store = SessionStore(tmp_path)
+    _finished(store, "ancient", 1000, 0.0, 1.0)
+    assert store.prune_older_than(0, now=100_000.0) == []
+    assert len(store.sorted()) == 1
+
+
+def test_hub_applies_the_age_window(tmp_path):
+    from csi.config import Settings
+    from csi.hub import Hub
+
+    settings = Settings()
+    settings.data_dir = tmp_path
+    settings.web_dir = None
+    settings.record = False
+    settings.max_age_h = 24.0
+    settings.max_disk_gb = 0  # age alone must be enough to delete it
+    settings.ensure_dirs()
+
+    hub = Hub(settings)
+    now = time.time()
+    stale = _finished(hub.sessions, "stale", 1000, now - 4 * 86400.0, now - 3 * 86400.0)
+    fresh = _finished(hub.sessions, "fresh", 1000, now - 3600.0, now - 60.0)
+
+    hub._prune_recordings()
+
+    assert hub.sessions.get(stale.id) is None
+    assert hub.sessions.get(fresh.id) is not None
+
+
+def test_hub_rolls_the_live_recording_once_it_is_old_enough(tmp_path):
+    """Without rolling, the always-on session never finishes and so can never age out."""
+    from csi.config import Settings
+    from csi.hub import Hub
+
+    settings = Settings()
+    settings.data_dir = tmp_path
+    settings.web_dir = None
+    settings.record = False
+    settings.roll_h = 1.0
+    settings.ensure_dirs()
+
+    hub = Hub(settings)
+    hub.start_recording("live")
+    first = hub.recorder.session
+    first.frames = 1000
+    first.started_at = time.time() - 3700.0
+
+    hub._roll_recording()
+
+    assert hub.recorder.session.id != first.id, "a new session must be open"
+    assert hub.sessions.get(first.id).ended_at is not None, "the old one must be finished"
+
+
+def test_roll_leaves_a_hand_started_capture_alone(tmp_path):
+    """Splitting a capture someone is in the room making would break that recording."""
+    from csi.config import Settings
+    from csi.hub import Hub
+
+    settings = Settings()
+    settings.data_dir = tmp_path
+    settings.web_dir = None
+    settings.record = False
+    settings.roll_h = 1.0
+    settings.ensure_dirs()
+
+    hub = Hub(settings)
+    hub.start_recording("overnight")
+    session = hub.recorder.session
+    session.frames = 1000
+    session.started_at = time.time() - 8 * 3600.0
+
+    hub._roll_recording()
+
+    assert hub.recorder.session.id == session.id
+
+
+def test_roll_does_not_spend_a_session_on_an_idle_node(tmp_path):
+    from csi.config import Settings
+    from csi.hub import Hub
+
+    settings = Settings()
+    settings.data_dir = tmp_path
+    settings.web_dir = None
+    settings.record = False
+    settings.roll_h = 1.0
+    settings.ensure_dirs()
+
+    hub = Hub(settings)
+    hub.start_recording("live")
+    session = hub.recorder.session
+    session.frames = 0  # nothing arrived: no node, or a replay suppressing live frames
+    session.started_at = time.time() - 8 * 3600.0
+
+    hub._roll_recording()
+
+    assert hub.recorder.session.id == session.id
+
+
 def test_hub_prunes_but_keeps_the_active_recording(tmp_path):
     """The hub's own wiring, not just the store's: budget applied, active session spared."""
     from csi.config import Settings
@@ -250,6 +416,7 @@ def test_hub_prunes_but_keeps_the_active_recording(tmp_path):
     settings.web_dir = None
     settings.record = False
     settings.max_disk_gb = 8000 / 1024**3  # 8000 bytes, expressed in GB
+    settings.max_age_h = 0  # isolate the size rule; the sessions here are deliberately ancient
     settings.ensure_dirs()
 
     hub = Hub(settings)
