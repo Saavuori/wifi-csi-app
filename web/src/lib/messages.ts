@@ -271,6 +271,64 @@ export interface Transmitter {
 }
 
 /**
+ * One transmitter's contribution to a node's capture, over the traffic window.
+ *
+ * `counts` is frames per second, oldest first, and every source's array is aligned to the same
+ * seconds as its node's — which is what lets them be stacked without any interpolation.
+ */
+export interface TrafficSource {
+  mac: string;
+  /** Since the node appeared. `frames_window` is the same count over the last `window_s`. */
+  frames: number;
+  frames_window: number;
+  rate_hz: number;
+  /** Fraction of the node's frames in the window that came from this transmitter. */
+  share: number;
+  counts: number[];
+  rssi: number;
+  /** Null when this source sent nothing inside the window. */
+  rssi_mean: number | null;
+  rssi_min: number | null;
+  rssi_max: number | null;
+  channel: number;
+  n_sub: number;
+  max_gap_s: number;
+  duty: number;
+  first_seen: number;
+  last_seen: number;
+  /** True only when the node's own scan saw this BSSID; `ssid` names it. */
+  ap: boolean;
+  ssid: string;
+  /** Locally administered address — what MAC randomization looks like from the air. */
+  randomized: boolean;
+  /** A group bit in a source address, which cannot happen on the air. See traffic.py. */
+  malformed: boolean;
+}
+
+/** The last `window_s` seconds of one node's capture, broken down by transmitter. */
+export interface TrafficNode {
+  node_id: number;
+  online: boolean;
+  window_s: number;
+  /** How much of the window the node has been around for; the rate is divided by this. */
+  covered_s: number;
+  counts: number[];
+  frames: number;
+  frames_window: number;
+  rate_hz: number;
+  /** Fraction of covered seconds that carried at least one frame. */
+  duty: number;
+  silent_s: number;
+  max_gap_s: number;
+  /** Frames with no source address: a v1 uplink, which has no such field. */
+  anonymous: number;
+  evicted: number;
+  first_seen: number;
+  last_seen: number;
+  sources: TrafficSource[];
+}
+
+/**
  * One node's control picture: what the operator asked for (`desired`), what the node last said
  * it applied (`applied`), and whether those agree yet. A node that never reports leaves
  * `applied` null — the UI reads that as "this node does not take control" and shows it read-only.

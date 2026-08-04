@@ -9,6 +9,7 @@ import { motionView } from "./views/motion";
 import { placementView } from "./views/placement";
 import { sessionsView } from "./views/sessions";
 import { subcarrierView } from "./views/subcarriers";
+import { trafficView } from "./views/traffic";
 import type { View } from "./views/view";
 import { waterfallView } from "./views/waterfall";
 import { wifiView } from "./views/wifi";
@@ -25,6 +26,7 @@ const views: View[] = [
   sessionsView(),
   healthView(),
   wifiView(),
+  trafficView(),
 ];
 
 /**
@@ -54,7 +56,7 @@ const TABS: Tab[] = [
     label: "More",
     glyph: ICONS.more,
     route: null,
-    covers: ["subcarriers", "zones", "sessions", "health", "wifi"],
+    covers: ["subcarriers", "zones", "sessions", "health", "wifi", "traffic"],
   },
 ];
 
@@ -97,6 +99,7 @@ const MORE: { id: string; blurb: string }[] = [
   { id: "sessions", blurb: "Record the room, replay it through the same pipeline" },
   { id: "health", blurb: "Rate, jitter, loss and roaming, per node" },
   { id: "wifi", blurb: "Channel and traffic per node; scan the air to pick an access point" },
+  { id: "traffic", blurb: "Which transmitters the capture is made of, and where it stalls" },
 ];
 
 const content = el("main", { class: "content" });

@@ -8,7 +8,7 @@
 // an ESP32, a replayed recording — is shown read-only, with only the transmitters it was heard
 // emitting. The distinction is drawn from the data, never assumed.
 
-import { clear, el, segmented, viewLayout } from "../lib/dom";
+import { clear, el, formatAgo, segmented, viewLayout } from "../lib/dom";
 import type { ScanAp, Transmitter, WifiNode } from "../lib/messages";
 import { store } from "../lib/store";
 import type { View } from "./view";
@@ -25,15 +25,6 @@ function signalClass(dbm: number | null): string {
   if (dbm >= -60) return "good";
   if (dbm >= -75) return "warn";
   return "bad";
-}
-
-function agoText(ts: number | null): string {
-  if (ts === null) return "never";
-  const seconds = Math.max(0, Date.now() / 1000 - ts);
-  if (seconds < 2) return "just now";
-  if (seconds < 90) return `${Math.round(seconds)}s ago`;
-  if (seconds < 5400) return `${Math.round(seconds / 60)}m ago`;
-  return `${Math.round(seconds / 3600)}h ago`;
 }
 
 export function wifiView(): View {
@@ -250,7 +241,7 @@ export function wifiView(): View {
     }
     box.append(
       table,
-      el("p", { class: "wifi-scan-age hint" }, `scanned ${agoText(scan.ts)}`),
+      el("p", { class: "wifi-scan-age hint" }, `scanned ${formatAgo(scan.ts)}`),
     );
     return box;
   }

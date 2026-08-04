@@ -25,6 +25,7 @@ When you update this file, bump the three values above to the commit you verifie
 |---|---|
 | `server/csi/protocol.py`, `firmware/main/csi_wire.h`, `pi/csi_node.py`, `web/src/lib/protocol.ts` | Wire formats, Invariant 1 |
 | `server/csi/hub.py` | Data path, Invariants 3–6 |
+| `server/csi/traffic.py` | Data path, the traffic view |
 | `server/csi/dsp/*` | DSP layer, Invariant 7 |
 | `server/csi/api.py` | HTTP + WebSocket surface |
 | `web/src/main.ts`, `web/src/views/*` | Views |
@@ -36,6 +37,7 @@ When you update this file, bump the three values above to the commit you verifie
 |---|---|
 | `server/csi/` | UDP ingest, echo responder, recorder, replayer, DSP, HTTP + WebSocket. FastAPI + uvicorn, numpy/scipy. Python ≥ 3.11. |
 | `server/csi/dsp/` | Pure numpy/scipy, no I/O — preprocess, presence, selection, vitals, zones, subcarriers, util. |
+| `server/csi/traffic.py` | Per-node, per-source-MAC one-second buckets: rate, duty, gaps, RSSI. Feeds `/api/traffic` and the WiFi overview's transmitter list. |
 | `web/src/` | TypeScript + canvas. **No framework**, no runtime deps. Vite. |
 | `pi/csi_node.py` | Raspberry Pi node: nexmon_csi capture → uplink datagrams. ~1700 lines, reports as node **20**. |
 | `firmware/main/` | ESP-IDF C for ESP32-S3/ESP32. Three roles: STATION, RECEIVER, TRANSMITTER. |
@@ -49,7 +51,7 @@ Everything enters through **one function**: `Hub.handle_datagram` (`server/csi/h
 UDP and replayed from disk alike.
 
 ```
-parse → health.observe → record (live only) → preprocess → ring.push → fan out to clients
+parse → health.observe → traffic.observe → record (live only) → preprocess → ring.push → fan out
 ```
 
 Analysis does **not** run here. A separate timer at `CSI_METRICS_HZ` (5 Hz) walks the per-node
@@ -116,15 +118,19 @@ Read the module docstrings — each states the design decision and the wrong app
 
 ## Views
 
-Ten, in `web/src/views/`: waterfall, subcarriers, motion, zones, breathing, heart, placement,
-sessions, health, wifi. Breathing and heart share one **Vitals** nav entry. Each implements the
-`View` interface (`views/view.ts`) — `mount()` subscribes, `unmount()` must release *every*
-subscription and animation frame.
+Eleven, in `web/src/views/`: waterfall, subcarriers, motion, zones, breathing, heart, placement,
+sessions, health, wifi, traffic. Breathing and heart share one **Vitals** nav entry. Each
+implements the `View` interface (`views/view.ts`) — `mount()` subscribes, `unmount()` must release
+*every* subscription, timer and animation frame.
 
 The WebSocket lives in a worker (`workers/socket.ts`), not the main thread: binary decode at
 100 Hz never competes with rendering, and frames reach the main thread pre-batched. Text
 WebSocket messages are JSON events at a few Hz; binary messages are CSI frames at node rate —
 the client dispatches on `typeof ev.data`, no tag byte.
+
+Two views poll HTTP instead of subscribing: wifi (5 s) and traffic (1 s). Both read state that
+moves at most once a second, and pushing either through the 5 Hz metrics broadcast would cost
+every connected client more bytes than the analysis it carries.
 
 Layout is phone-first: the 320 px desktop control rail becomes a bottom sheet. This matters
 because the placement tuner and zone recorder exist to be used while walking around the room.

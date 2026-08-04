@@ -96,6 +96,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def wifi() -> dict:
         return hub.wifi_report()
 
+    @app.get("/api/traffic")
+    async def traffic() -> dict:
+        """Which transmitters the last two minutes of capture came from, per node.
+
+        Polled rather than broadcast. The numbers move at 1 Hz at most — they are seconds-long
+        buckets — and the metrics broadcast runs at 5 Hz to every connected client, so pushing a
+        table of sixty-four sources through it would multiply the WebSocket's traffic by more
+        than the analysis it exists to carry.
+        """
+        return hub.traffic_report()
+
     @app.get("/api/nodes/{node_id}/history")
     async def node_history(node_id: int, seconds: float = 0.0) -> Response:
         """The node's recent CSI as one binary block, so a fresh client can draw it at once.
