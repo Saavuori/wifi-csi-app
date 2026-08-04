@@ -16,6 +16,15 @@ Versions are `MAJOR.MINOR.PATCH`:
 The git tag is authoritative. `server/pyproject.toml` and `web/package.json` are updated to
 match, and the running server reports the same number on `/api/version` and in the header.
 
+## v0.2.0 — 2026-08-04
+
+feat: keep only recent recordings, and let the waterfall look back (#33)
+
+### Changes
+- feat: keep only recent recordings, and let the waterfall look back
+
+Release type: **minor** (v0.1.3 → v0.2.0)
+
 ## v0.1.3 — 2026-08-04
 
 fix: one Vitals entry in the sidebar, not two (#31)
