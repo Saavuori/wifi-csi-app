@@ -16,6 +16,15 @@ Versions are `MAJOR.MINOR.PATCH`:
 The git tag is authoritative. `server/pyproject.toml` and `web/package.json` are updated to
 match, and the running server reports the same number on `/api/version` and in the header.
 
+## v0.1.1 — 2026-08-04
+
+fix: give the release-notes step the environment it needs (#28)
+
+### Changes
+- fix: give the release-notes step the environment it needs
+
+Release type: **patch** (v0.1.0 → v0.1.1)
+
 ## v0.1.0 — 2026-08-03
 
 feat: report the running build, automate versioning, and fill the screen with the waterfall (#27)
