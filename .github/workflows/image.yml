@@ -41,9 +41,10 @@ jobs:
   image:
     name: amd64 + arm64
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
+    # Deliberately no `permissions:` block. A called workflow's job permissions do not add to
+    # what the caller granted, they narrow it — so a copy here is a third place to keep in step
+    # and a silent way to drop a scope the caller carefully passed in. The callers grant
+    # `packages: write` to publish and `actions: write` for the build cache; see ci.yml.
 
     steps:
       - uses: actions/checkout@v4
@@ -116,7 +117,17 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # `mode=min` and `ignore-error=true`, both for the same incident. GitHub gives a repo
+          # 10 GB of Actions cache; `mode=max` stores every intermediate layer of a two-platform
+          # build, which filled it (559 entries, 10.14 GB) and left later runs unable to reserve
+          # space. Export then failed with "failed to reserve cache" and took the whole job with
+          # it, after the image had already built successfully — which is how v0.3.1 came to be
+          # released with no image behind it.
+          #
+          # `ignore-error=true` is the part that matters: a cache is an optimization, and losing
+          # one must never fail a build. `mode=min` keeps it from refilling as fast, at the cost
+          # of colder builds for cache misses.
+          cache-to: type=gha,mode=min,ignore-error=true
           # Without this the package listing grows an "unknown/unknown" entry per platform,
           # which makes it look like the multi-arch manifest is broken when it is not.
           provenance: false
