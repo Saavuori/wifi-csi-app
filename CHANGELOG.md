@@ -16,6 +16,15 @@ Versions are `MAJOR.MINOR.PATCH`:
 The git tag is authoritative. `server/pyproject.toml` and `web/package.json` are updated to
 match, and the running server reports the same number on `/api/version` and in the header.
 
+## v0.3.0 — 2026-08-04
+
+feat: teach the room its zones, and say which one the movement is in (#32)
+
+### Changes
+- feat: teach the room its zones, and say which one the movement is in
+
+Release type: **minor** (v0.2.0 → v0.3.0)
+
 ## v0.2.0 — 2026-08-04
 
 feat: keep only recent recordings, and let the waterfall look back (#33)
