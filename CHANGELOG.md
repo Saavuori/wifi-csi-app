@@ -16,6 +16,15 @@ Versions are `MAJOR.MINOR.PATCH`:
 The git tag is authoritative. `server/pyproject.toml` and `web/package.json` are updated to
 match, and the running server reports the same number on `/api/version` and in the header.
 
+## v0.4.0 — 2026-08-04
+
+feat: say which transmitters the capture is made of, and where it stalls (#38)
+
+### Changes
+- feat: say which transmitters the capture is made of, and where it stalls
+
+Release type: **minor** (v0.3.3 → v0.4.0)
+
 ## v0.3.3 — 2026-08-04
 
 fix: make traffic generation actually reach the air (#36)
