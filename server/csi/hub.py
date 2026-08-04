@@ -513,12 +513,40 @@ class Hub:
 
     async def _metrics_loop(self) -> None:
         period = 1.0 / max(self.settings.metrics_hz, 0.1)
+        # Pruning stats every file in the recordings directory, so it runs on a slow timer of
+        # its own rather than at the metrics rate. A minute is far quicker than the hours it
+        # takes to write a gigabyte, and cheap enough not to matter.
+        prune_every = max(1, int(60.0 / period))
+        tick = 0
         while not self._stopping:
             await asyncio.sleep(period)
             try:
                 await self._emit_metrics()
             except Exception:  # a bad window must not kill the loop for the rest of the session
                 log.exception("metrics computation failed")
+
+            tick += 1
+            if tick % prune_every == 0:
+                try:
+                    await asyncio.to_thread(self._prune_recordings)
+                except Exception:
+                    # Never fatal: failing to free disk is bad, but taking the metrics loop
+                    # down with it would stop the measurement as well as the housekeeping.
+                    log.exception("pruning recordings failed")
+
+    def _prune_recordings(self) -> None:
+        """Keep the recordings directory under the configured budget. Runs off the event loop."""
+        budget = int(self.settings.max_disk_gb * 1024**3)
+        if budget <= 0:
+            return
+        active = self.recorder.session if self.recorder is not None else None
+        removed = self.sessions.prune(budget, keep=active)
+        if removed:
+            log.info(
+                "pruned %d recording(s) to stay under %.1f GB: %s",
+                len(removed), self.settings.max_disk_gb, ", ".join(removed),
+            )
+            self.broadcast({"type": "sessions_pruned", "session_ids": removed})
 
     async def _emit_metrics(self) -> None:
         """Compute always; broadcast only when someone is listening.

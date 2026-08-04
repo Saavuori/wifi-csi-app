@@ -162,3 +162,56 @@ class SessionStore:
 
     def file_for(self, session: Session) -> Path:
         return self.directory / session.path
+
+    def total_bytes(self) -> int:
+        """Bytes on disk across every recording, from the files rather than the metadata.
+
+        The metadata's `bytes` is flushed periodically and is behind by design; a retention
+        decision has to be made against what the disk actually holds.
+        """
+        total = 0
+        for path in self.directory.glob("*.csi"):
+            try:
+                total += path.stat().st_size
+            except OSError:
+                continue
+        return total
+
+    def prune(self, budget_bytes: int, *, keep: Session | None = None) -> list[str]:
+        """Delete oldest-first until the recordings fit in `budget_bytes`. Returns what went.
+
+        A node left running writes about a gigabyte a day. On the SD card that is the default
+        home for it, that is a wear problem as much as a capacity one, and the failure mode is
+        the worst kind: the appliance works for a month and then stops, having filled the card
+        the operating system is also on.
+
+        Oldest-first, and never the session currently being written — deleting the file under
+        the recorder would lose the session anyone is actually watching. A labelled session is
+        no more protected than any other: this is a disk limit, not a judgement about value,
+        and pretending otherwise would just mean the limit silently stops working for someone
+        who labels everything.
+        """
+        if budget_bytes <= 0:
+            return []
+        total = self.total_bytes()
+        if total <= budget_bytes:
+            return []
+
+        removed: list[str] = []
+        # Oldest first; `sorted()` is newest-first.
+        for session in reversed(self.sorted()):
+            if total <= budget_bytes:
+                break
+            if keep is not None and session.id == keep.id:
+                continue
+            size = 0
+            for suffix in ("", ".idx"):
+                path = self.directory / (session.path + suffix)
+                try:
+                    size += path.stat().st_size
+                except OSError:
+                    pass
+            if self.delete(session.id):
+                removed.append(session.id)
+                total -= size
+        return removed

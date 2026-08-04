@@ -72,6 +72,12 @@ class Settings:
     # expensive than the disk: a node at 80 Hz writes about 1 GB per day.
     record: bool = field(default_factory=lambda: _env_bool("CSI_RECORD", True))
 
+    # Cap on the recordings directory, in gigabytes; 0 disables pruning. A node writes roughly
+    # a gigabyte a day, and the default home for it is the SD card the operating system is also
+    # on. Unbounded, the appliance works for a month and then stops. Oldest recordings are
+    # deleted to stay under this — see SessionStore.prune.
+    max_disk_gb: float = field(default_factory=lambda: _env_float("CSI_MAX_DISK_GB", 8.0))
+
     # A node that says nothing for this long is reported offline.
     node_timeout_s: float = field(default_factory=lambda: _env_float("CSI_NODE_TIMEOUT_S", 5.0))
 
