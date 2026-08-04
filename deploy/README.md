@@ -49,8 +49,21 @@ Two host settings the container cannot do for itself:
   is a wear problem as much as a capacity one; use a USB SSD for anything longer than a test,
   or run with `CSI_RECORD=false`.
 
-The image is `ghcr.io/saavuori/wifi-csi-app:latest`, built for linux/amd64 and linux/arm64 by
-[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) after the tests pass.
+The image is built for linux/amd64 and linux/arm64 by
+[`.github/workflows/image.yml`](../.github/workflows/image.yml), which
+[`ci.yml`](../.github/workflows/ci.yml) runs after the tests pass and
+[`release.yml`](../.github/workflows/release.yml) runs against each new tag.
+
+Three ways to name it, in descending order of how much you want to be surprised:
+
+| Reference | Points at |
+|---|---|
+| `ghcr.io/saavuori/wifi-csi-app:latest` | the newest release — what `install.sh` pulls |
+| `...:0.3.0`, or `...:0.3` | that exact version, or the newest patch on that minor |
+| `...:main` | the newest build of `main`, released or not |
+
+`latest` moves only when a release is cut, never on a push to `main`. If you want the tip of
+`main`, ask for `:main` — that is what it is there for.
 
 ## Build and run
 

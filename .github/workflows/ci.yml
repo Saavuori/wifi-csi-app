@@ -68,76 +68,27 @@ jobs:
       - run: npm run build
         working-directory: web
 
+  # The build itself lives in image.yml so that release.yml runs exactly this one, rather than
+  # keeping a second copy that can drift. The `v*` push trigger above still reaches it, which
+  # covers a tag pushed by hand — but a release no longer depends on that, because a tag pushed
+  # by a workflow never triggers anything. See the header of image.yml.
   image:
-    name: image (amd64 + arm64)
-    runs-on: ubuntu-latest
+    name: image
     needs: [server, firmware, web]
     permissions:
       contents: read
       packages: write
-
-    steps:
-      - uses: actions/checkout@v4
-
-      # arm64 is emulated here. Only the pip install runs under it — the front end stage is
-      # pinned to the build platform in the Containerfile — and numpy/scipy resolve to
-      # prebuilt aarch64 wheels, so nothing in the emulated half actually compiles.
-      - uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable={{is_default_branch}}
-
-      # What the running server reports on /api/version and shows in the header. A tag build
-      # takes its version from the tag; anything else is labelled with the branch and short
-      # SHA, so an image someone pulled off a feature branch never claims to be a release.
-      - id: build-info
-        run: |
-          set -euo pipefail
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            version="${GITHUB_REF#refs/tags/v}"
-          else
-            version="0.0.0-${GITHUB_REF_NAME//\//-}.${GITHUB_SHA::7}"
-          fi
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
-
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: deploy/Containerfile
-          platforms: linux/amd64,linux/arm64
-          build-args: |
-            CSI_VERSION=${{ steps.build-info.outputs.version }}
-            CSI_COMMIT=${{ github.sha }}
-            CSI_BUILT_AT=${{ steps.build-info.outputs.built_at }}
-          # A pull request builds to prove the Containerfile still works, and publishes
-          # nothing. Everything else publishes under its own branch or version tag; `latest`
-          # only ever moves on the default branch.
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          # Without this the package listing grows an "unknown/unknown" entry per platform,
-          # which makes it look like the multi-arch manifest is broken when it is not.
-          provenance: false
+    uses: ./.github/workflows/image.yml
+    with:
+      # A pull request builds to prove the Containerfile still works, and publishes nothing.
+      # Everything else publishes under its own branch or version tag.
+      push: ${{ github.event_name != 'pull_request' }}
+      # No `latest` here. It names the newest *release* — see release.yml — because `install.sh`
+      # pulls it by default, and a fresh install landing on an unreviewed main build is how a Pi
+      # ends up running a version that was never released. `main` is still published under its
+      # own name for anyone who wants exactly that.
+      tags: |
+        type=ref,event=branch
+        type=ref,event=pr
+        type=semver,pattern={{version}}
+        type=semver,pattern={{major}}.{{minor}}

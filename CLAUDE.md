@@ -180,3 +180,9 @@ The **git tag is authoritative**. `.github/scripts/apply_version.py` writes it i
 `server/pyproject.toml` and `web/package.json` and prepends the changelog entry. The running
 server reports it on `/api/version`, in the `hello` snapshot, and in the header — resolved by
 `server/csi/version.py` from build env → package metadata → `"dev"`, never an invented number.
+
+`release.yml` then builds the image from the tag it just pushed, by calling `image.yml` — the
+same reusable workflow `ci.yml` calls. It does **not** wait for the tag push to trigger anything:
+a push made with `GITHUB_TOKEN` starts no workflow run, which is why v0.1.0 through v0.3.0 were
+released with no image behind them. `latest` moves here and nowhere else; a push to `main`
+publishes `main`, not `latest`.

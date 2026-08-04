@@ -455,7 +455,9 @@ uplink header, alongside the ESP32's C and the server's Python, and that round t
 it drifting from the other two.
 
 All four run in CI on every push, and the container image is built for amd64 and arm64 only
-after they pass — see [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+after they pass — see [`.github/workflows/ci.yml`](.github/workflows/ci.yml). Cutting a release
+runs that same build against the new tag, from
+[`.github/workflows/release.yml`](.github/workflows/release.yml).
 
 ## Configuration
 
