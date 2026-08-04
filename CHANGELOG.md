@@ -16,6 +16,15 @@ Versions are `MAJOR.MINOR.PATCH`:
 The git tag is authoritative. `server/pyproject.toml` and `web/package.json` are updated to
 match, and the running server reports the same number on `/api/version` and in the header.
 
+## v0.3.3 — 2026-08-04
+
+fix: make traffic generation actually reach the air (#36)
+
+### Changes
+- fix: make traffic generation actually reach the air
+
+Release type: **patch** (v0.3.2 → v0.3.3)
+
 ## v0.3.2 — 2026-08-04
 
 fix: stop the build cache from failing the release image (#37)

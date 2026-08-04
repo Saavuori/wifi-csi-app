@@ -1,6 +1,6 @@
 [project]
 name = "csi-server"
-version = "0.3.2"
+version = "0.3.3"
 description = "WiFi CSI ingest, recording, replay and analysis"
 requires-python = ">=3.11"
 dependencies = [
