@@ -135,7 +135,7 @@ export function wifiView(): View {
     );
 
     // Stimulus: the "generate traffic vs. only listen" switch the user asked for. Auto lets the
-    // node decide from how busy the channel is; always forces the Ethernet multicast on (and
+    // node decide from how busy the channel is; always forces the Ethernet broadcast on (and
     // with it 20 MHz / 64 subcarriers); off is pure listening.
     box.append(
       el(
@@ -391,7 +391,7 @@ export function wifiView(): View {
 function stimulusHint(mode: string): string {
   switch (mode) {
     case "always":
-      return "Emits Ethernet multicast the access point floods onto the air, so the capture " +
+      return "Emits Ethernet broadcast the access point floods onto the air, so the capture " +
         "rate holds even on an idle network — at the cost of 20 MHz / 64 subcarriers while on.";
     case "off":
       return "Pure listening: the node measures only the traffic that already exists. Full " +

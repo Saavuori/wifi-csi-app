@@ -76,7 +76,7 @@ Pi can no longer generate stimulus over the air addressed to itself — which is
 One caveat carried over from the measurements: driving traffic at a *specific* wireless client
 of the same AP gives the best of both — full 256 subcarriers, because the AP sends unicast at
 80 MHz — but on a mesh, a client that roams to another unit changes the transmitter MAC and the
-`CSI_AP_MAC` filter then drops the frames (184 Hz seen, ~22 Hz passing). The multicast stimulus
+`CSI_AP_MAC` filter then drops the frames (184 Hz seen, ~22 Hz passing). The Ethernet stimulus
 has no target to lose, and that is the trade it makes against subcarrier count.
 
 > **This branch still carries the associated-mode code.** `Prober` in `csi_node.py` pings the
@@ -128,7 +128,7 @@ records a roam rather than a roam *and* a reboot.
 
 A Pi whose radio only listens — monitor mode, Ethernet as its backbone — cannot generate the
 traffic it measures over the air. What it can do is put a packet on the wire and let the access
-point transmit it: multicast sent out of `eth0` is flooded onto every BSS the AP bridges, so the
+point transmit it: broadcast sent out of `eth0` is flooded onto every BSS the AP bridges, so the
 monitor radio measures the AP's transmission of it. Nothing has to be associated, and no second
 wireless device has to exist anywhere in the house.
 
@@ -151,12 +151,28 @@ the gate is deliberately slow to change its mind.
 The same trim applies to beacons, which are legacy 20 MHz for the same reason. Before this they
 were forwarded whole, three quarters noise.
 
-**The group has to be inside 224.0.0.0/24.** That range is the local network control block, and
-switches and access points forward it on every port regardless of IGMP snooping. An
-administratively scoped group like `239.1.1.1` is the obvious choice and the wrong one: nothing
-on the wireless side has joined it, so a snooping AP prunes it, and the stimulus is then emitted
-flawlessly and never reaches the air. The node says so when it has sent packets and had nothing
-come back, which together with `--stimulus always` is the fastest way to tell the two apart.
+**It broadcasts, and it used to multicast.** The original destination was a group inside
+224.0.0.0/24 — the local network control block, which RFC 4541 §2.1.2 says a snooping switch
+must forward on every port — picked precisely because it looked like the one range no access
+point could prune. Measured against a Zyxel-family AP: 50 packets a second left `eth0` for
+`224.0.0.200` for ten minutes, confirmed on the wire with `tcpdump`, and the capture rate never
+moved off the 39 Hz its beacons alone produced. Changing the destination to `255.255.255.255`
+and nothing else took the same node to 80 Hz.
+
+The RFC governs snooping switches. An access point that converts multicast to unicast for the
+stations that joined a group is not violating it, and it has nobody to convert *this* group for
+— the radio is in monitor mode and has joined nothing. Broadcast has no membership to be absent:
+an AP that dropped it would break ARP.
+
+`--stimulus-target` still takes a group, because on an AP that does flood 224.0.0.0/24 that is
+the tidier choice — it reaches only the ports a snooping switch has learned, where broadcast
+reaches every host on the segment. `--stimulus-group` is kept as an alias for the flag.
+
+**The node says when the stimulus is reaching nothing**, by comparing the capture rate against
+what it was in the status interval before arming. It used to ask whether *any* frames were
+arriving, which on this AP was answered by 39 Hz of beacons — so the one fault the check existed
+to name was the one shape it could not see. Arming it by hand with `--stimulus always` and
+watching the next status line is the fastest way to tell a dead emitter from a deaf AP.
 
 ## What nexmon does not give us
 
@@ -303,9 +319,11 @@ If the service is up but no frames arrive, work down this list:
   firmware side is the problem, not the forwarder.
 - Is anything generating traffic? With `--stimulus off` and a quiet channel there is genuinely
   nothing to measure but beacons.
-- `sudo tcpdump -i eth0 -n 'host 224.0.0.200'` on *another* machine on the same network — is the
-  stimulus leaving the Pi, and does it reach the rest of the segment? Silent on the Pi means the
-  emitter is misconfigured; visible on the Pi but not elsewhere means a switch is eating it.
+- `sudo tcpdump -i eth0 -n 'udp port 5510'`, on the Pi and then on *another* machine on the same
+  network — is the stimulus leaving the Pi, and does it reach the rest of the segment? Silent on
+  the Pi means the emitter is misconfigured; visible on the Pi but not elsewhere means a switch
+  is eating it; visible on both while the capture rate stays flat means the access point is not
+  putting it on the air, which is what the node's own warning names.
 - `iw dev wlan0 get power_save` — power save lets the chip doze between beacons, which shows
   up as gaps. `csi-connected.sh` turns it off, but NetworkManager will turn it back on;
   `nmcli connection modify <name> wifi.powersave 2` makes that stick.
@@ -323,7 +341,8 @@ If the service is up but no frames arrive, work down this list:
 | `CSI_PROBE_HZ` | 100 | 0 to send nothing and ride the beacons |
 | `CSI_AP_MAC` | the associated BSSID | Only measure frames from this transmitter |
 | `CSI_STIMULUS` | `auto` | `always` to force it on, `off` to disable |
-| `CSI_STIMULUS_IFACE` | `eth0` | Wired interface the multicast leaves by |
+| `CSI_STIMULUS_IFACE` | `eth0` | Wired interface the stimulus leaves by |
+| `CSI_STIMULUS_TARGET` | `255.255.255.255` | Where it is sent. A multicast group works only on an AP that floods it to the wireless side — see above |
 | `CSI_STIMULUS_HZ` | 50 | Rate while armed |
 | `CSI_STALL_S` | 90 | Re-apply the extractor after this long with no frames; 0 to disable |
 | `CSI_CONTROL_URL` | the server's HTTP port | Polled for channel and stimulus changes from the web UI; blank to make this node read-only |

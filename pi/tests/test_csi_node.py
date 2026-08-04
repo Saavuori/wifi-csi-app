@@ -22,9 +22,11 @@ from csi_node import (
     NEXMON_HEADER_SIZE,
     Node,
     RateGate,
+    StimulusAudit,
     chanspec_channel,
     chanspec_sec_channel,
     encode_uplink,
+    is_multicast,
     occupied_span,
     parse_nexmon,
     quantize,
@@ -291,6 +293,33 @@ def test_only_full_width_frames_count_as_other_peoples_traffic():
     assert node.dropped_class == 1
 
 
+def test_basic_rate_frames_are_counted_whatever_class_the_node_is_in():
+    """What StimulusAudit reads. It has to survive the class flip that arming causes, so a
+    narrowband frame counts whether or not this node was forwarding narrowband at the time."""
+    node = Node(node_id=20)
+    narrow = parse_nexmon(nexmon_packet(narrowband_csi(), chanspec=CHANSPEC_CH36_80))
+    wide = parse_nexmon(nexmon_packet(sample_csi(256), chanspec=CHANSPEC_CH36_80))
+
+    node.narrowband = False  # passive, full width: the narrow frames are dropped as off-class
+    node.on_packet(narrow, 0)
+    node.on_packet(wide, 10_000)
+    assert node.basic_seen == 1
+
+    node.narrowband = True  # armed: same frames, opposite class, same count
+    node.on_packet(narrow, 20_000)
+    node.on_packet(wide, 30_000)
+    assert node.basic_seen == 2
+
+
+def test_every_frame_on_a_20mhz_link_is_a_basic_rate_frame():
+    """A capture too narrow to split has no classes, and the counter must not sit at zero there
+    — the audit would read that as a stimulus reaching nothing on a link where it works."""
+    node = Node(node_id=20)
+    for i in range(5):
+        node.on_packet(parse_nexmon(nexmon_packet(sample_csi(64))), i * 10_000)
+    assert node.basic_seen == 5
+
+
 # -- the stimulus gate -------------------------------------------------------------------
 
 
@@ -361,6 +390,130 @@ def test_the_dwell_stops_the_gate_thrashing():
         seen += 0 if (i // 10) % 2 == 0 else 25
         g.update(now, seen)
     assert g.changes <= 300 / 30 + 1
+
+
+# -- is the stimulus reaching the air ------------------------------------------------------
+
+
+def test_the_default_target_is_a_broadcast_address():
+    """A multicast group is a bet on the access point; broadcast is not. See STIMULUS_TARGET."""
+    assert is_multicast(csi_node.STIMULUS_TARGET) is False
+    assert is_multicast("224.0.0.200") is True
+    assert is_multicast("239.1.1.1") is True
+    assert is_multicast("192.168.1.255") is False
+
+
+def test_the_target_flag_keeps_its_old_spelling_working():
+    """--stimulus-group is written into deployed /etc/default/csi-node files."""
+    args = csi_node.parse_args(["--stimulus-group", "224.0.0.200"])
+    assert args.stimulus_target == "224.0.0.200"
+    assert csi_node.parse_args([]).stimulus_target == csi_node.STIMULUS_TARGET
+
+
+def audited(*, baseline_hz: float | None, armed_rate_hz: float, sent_hz: float = 50.0):
+    """Arm the stimulus after an optional quiet interval, then run one armed interval.
+
+    A baseline needs two observations, because the rate is a delta between them.
+    """
+    audit = StimulusAudit()
+    now, sent, seen = 0.0, 0, 0
+    if baseline_hz is not None:
+        for _ in range(2):
+            audit.observe(now, seen, sent, 10.0)
+            now += 10.0
+            seen += int(baseline_hz * 10)
+        audit.observe(now, seen, sent, 10.0)
+    audit.armed(now, sent, seen)
+    now += 10.0
+    sent += int(sent_hz * 10)
+    seen += int(armed_rate_hz * 10)
+    return audit.observe(now, seen, sent, 10.0)
+
+
+def test_a_stimulus_the_access_point_ignores_is_named():
+    """The regression this exists for: 40 Hz of beacons before arming, 40 Hz after, and every
+    other number on the status line healthy. The old check asked whether frames were arriving
+    at all, so it stayed silent through exactly this."""
+    verdict = audited(baseline_hz=40.0, armed_rate_hz=40.6)
+    assert verdict is not None
+    assert verdict.sent == 500
+    assert "40.0 Hz before arming" in verdict.detail
+
+
+def test_a_stimulus_that_reaches_the_air_says_nothing():
+    """Measured on hardware, ~80% of what is emitted comes back as frames."""
+    assert audited(baseline_hz=40.0, armed_rate_hz=80.0) is None
+
+
+def test_a_partial_yield_still_counts_as_working():
+    """The bar is a quarter of the emitted rate, not all of it — the extractor drops frames of
+    its own, and a warning that fires on a working setup trains people to ignore it."""
+    assert audited(baseline_hz=40.0, armed_rate_hz=40.0 + 0.3 * 50.0) is None
+
+
+def test_without_a_baseline_only_total_silence_is_reported():
+    """A node booted straight into `always` never measured a disarmed interval. There is no
+    honest comparison to make, so it falls back to the weaker, older question."""
+    assert audited(baseline_hz=None, armed_rate_hz=40.0) is None
+    assert audited(baseline_hz=None, armed_rate_hz=0.0) is not None
+
+
+def test_a_half_armed_interval_is_not_judged():
+    """Arming mid-interval shows a half-sized gain, which would cry wolf on a working node."""
+    audit = StimulusAudit()
+    audit.observe(0.0, 0, 0, 10.0)
+    audit.observe(10.0, 400, 0, 10.0)
+    audit.armed(15.0, 0, 600)  # halfway through the next interval
+    assert audit.observe(20.0, 800, 250, 10.0) is None
+
+
+def test_the_verdict_is_given_once_per_arming():
+    """It pairs with the "arming the stimulus" line; repeating it every interval says nothing."""
+    audit = StimulusAudit()
+    now, sent, seen = 0.0, 0, 0
+    for _ in range(2):
+        audit.observe(now, seen, sent, 10.0)
+        now, seen = now + 10.0, seen + 400
+    audit.observe(now, seen, sent, 10.0)
+
+    audit.armed(now, sent, seen)
+    now, sent, seen = now + 10.0, sent + 500, seen + 400
+    assert audit.observe(now, seen, sent, 10.0) is not None
+    now, sent, seen = now + 10.0, sent + 500, seen + 400
+    assert audit.observe(now, seen, sent, 10.0) is None
+
+    # Disarming and arming again is a new question, and gets a new answer.
+    audit.disarmed()
+    audit.armed(now, sent, seen)
+    now, sent, seen = now + 10.0, sent + 500, seen + 400
+    assert audit.observe(now, seen, sent, 10.0) is not None
+
+
+def test_the_class_switch_at_arming_does_not_pass_for_a_working_stimulus():
+    """Caught on hardware. Arming also switches the node to the 20 MHz class, so the *forwarded*
+    rate leaps from whatever full-width traffic there was to the full beacon rate — 1.9 Hz to
+    39.7 Hz, with the stimulus reaching nothing. `basic_seen` counts beacons the whole way
+    through, at either class, so the baseline survives the switch and the fault is still named."""
+    audit = StimulusAudit()
+    now, sent, seen = 0.0, 0, 0
+    # Passive and full-width: 39 Hz of beacons seen, almost none of them forwarded.
+    for _ in range(2):
+        audit.observe(now, seen, sent, 10.0)
+        now, seen = now + 10.0, seen + 390
+    audit.observe(now, seen, sent, 10.0)
+
+    audit.armed(now, sent, seen)
+    # Armed. The node now forwards those beacons, but the air carries nothing new.
+    now, sent, seen = now + 10.0, sent + 500, seen + 397
+    verdict = audit.observe(now, seen, sent, 10.0)
+    assert verdict is not None
+    assert "39.0 Hz before arming, 39.7 Hz now" in verdict.detail
+
+
+def test_a_stimulus_that_sent_nothing_is_not_blamed_on_the_access_point():
+    """A thread that could not open its socket has already said so, and it is a different
+    fault: nothing left the host, so nothing can be concluded about what the AP does."""
+    assert audited(baseline_hz=40.0, armed_rate_hz=40.0, sent_hz=0.0) is None
 
 
 # -- quantization ------------------------------------------------------------------------

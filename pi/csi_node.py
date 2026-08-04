@@ -9,10 +9,9 @@ it is looking at a Pi.
 A node that only listens samples whenever the network happens to talk near it, which makes the
 rate a property of the household rather than of the node. Generating the traffic is what fixes
 that, and there are two ways to do it here. `Prober` pings the access point over the wireless
-interface. `MulticastStimulus` emits multicast on the *wired* interface and lets the access
-point put it on the air, which is what a monitoring-only Pi — radio in monitor mode, Ethernet
-as its backbone — has available. The second costs subcarriers, for the reason `occupied_span`
-describes.
+interface. `Stimulus` emits broadcast on the *wired* interface and lets the access point put it
+on the air, which is what a monitoring-only Pi — radio in monitor mode, Ethernet as its backbone
+— has available. The second costs subcarriers, for the reason `occupied_span` describes.
 
 Some of what the wire format carries is not in a nexmon packet, and each gap is handled here:
 
@@ -58,6 +57,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -106,15 +106,29 @@ NEXMON_UDP_PORT = 5500
 
 # -- the Ethernet stimulus ----------------------------------------------------------------
 
-# Any group inside 224.0.0.0/24 is the local network control block, which switches and access
-# points forward on every port regardless of IGMP snooping (RFC 4541 §2.1.2). That range is the
-# whole reason this works. The obvious-looking choice — an administratively scoped group like
-# 239.1.1.1 — is exactly what a snooping access point prunes, because nothing on the wireless
-# side has joined it, and the stimulus would then be emitted flawlessly and never reach the air.
-# Anything else in the block is equally fine; anything outside it is a bet on how this
-# particular access point is configured.
-STIMULUS_GROUP = "224.0.0.200"
+# Broadcast, and that is a correction rather than a preference. This was a multicast group
+# inside 224.0.0.0/24 — the local network control block, which RFC 4541 §2.1.2 says a snooping
+# switch must forward on every port — chosen precisely because it looked like the one range no
+# access point could prune. Measured against a Zyxel-family AP: 50 packets per second left eth0
+# for 224.0.0.200 for ten minutes (confirmed with tcpdump) and the capture rate never moved off
+# the 39 Hz its beacons alone produced. Swapping the destination for 255.255.255.255, changing
+# nothing else, took the same node to 80 Hz.
+#
+# The RFC governs snooping switches. An access point that converts multicast to unicast for the
+# stations that joined a group is not violating it, and it has nobody to convert *this* group
+# for — the radio is in monitor mode and has joined nothing. Broadcast has no such membership to
+# be absent: an AP that dropped it would break ARP, so every AP floods it.
+#
+# Still configurable, because the tradeoff runs the other way on a busy segment: broadcast
+# reaches every host on it, where a multicast group reaches only the ports a snooping switch
+# has learned. On an AP that does flood 224.0.0.0/24 that is the tidier choice.
+STIMULUS_TARGET = "255.255.255.255"
 STIMULUS_PORT = 5510
+# How much of the emitted rate has to come back as captured frames before the stimulus counts as
+# working. Measured on a Pi 3B+ against an AP that does flood it, about 80% of the packets sent
+# reappear as frames; the rest are lost to the extractor's own gaps. A quarter is therefore a
+# floor a working setup does not fall below and a broken one does not reach.
+STIMULUS_MIN_YIELD = 0.25
 # Enough bytes to hold the air for a few hundred microseconds at the basic rate, which is what
 # buys a decent channel estimate. The text is here so that a tcpdump on some other machine says
 # what this traffic is instead of looking like a stray flood.
@@ -271,7 +285,7 @@ def chanspec_sec_channel(chanspec: int) -> int:
 #
 # This is not a corner case, and it is not new with the stimulus. Every beacon is legacy 20 MHz,
 # and so is everything an access point sends to a broadcast address, which is precisely what
-# MulticastStimulus provokes. Forwarded whole, each of those frames asks the server to normalize
+# Stimulus provokes. Forwarded whole, each of those frames asks the server to normalize
 # across three quarters of noise.
 #
 # Detection is a comparison between 64-subcarrier blocks: a narrowband frame puts all of its
@@ -620,8 +634,8 @@ class Prober(threading.Thread):
     extractor's ucode deafens the PHY across every CSI dump and unicast data dies there, so an
     associated Pi sees beacons and broadcast and nothing else. See pi/README.md.
 
-    MulticastStimulus is the working answer, and it works because it never needs a frame
-    addressed to this Pi at all.
+    `Stimulus` is the working answer, and it works because it never needs a frame addressed to
+    this Pi at all.
     """
 
     def __init__(self, target: str, hz: float, iface: str | None = None) -> None:
@@ -678,8 +692,14 @@ class Prober(threading.Thread):
         sock.close()
 
 
-class MulticastStimulus(threading.Thread):
-    """Emits multicast on the wired interface so the access point has something to transmit.
+def is_multicast(address: str) -> bool:
+    """Whether a dotted-quad is in 224.0.0.0/4, which decides how the socket is set up."""
+    head = address.split(".", 1)[0]
+    return head.isdigit() and 224 <= int(head) <= 239
+
+
+class Stimulus(threading.Thread):
+    """Emits broadcast on the wired interface so the access point has something to transmit.
 
     For a Pi whose radio does nothing but listen, this is the only way to make the capture rate
     a property of the node. The packet leaves over Ethernet, the access point floods it onto
@@ -692,14 +712,17 @@ class MulticastStimulus(threading.Thread):
     subcarriers while this is running. That is why it is a fallback rather than the default, and
     why `RateGate` only arms it when there is nothing better to measure.
 
+    The destination is a broadcast address by default and a multicast group if configured as
+    one; see STIMULUS_TARGET for why the default moved, and `_open` for what each needs.
+
     Armed and disarmed from the capture loop rather than starting and stopping, so that a
     transition costs an Event set instead of a thread and a socket.
     """
 
-    def __init__(self, iface: str, group: str, port: int, hz: float) -> None:
+    def __init__(self, iface: str, target: str, port: int, hz: float) -> None:
         super().__init__(name="stimulus", daemon=True)
         self.iface = iface
-        self.group = group
+        self.target = target
         self.port = port
         self.interval = 1.0 / hz if hz > 0 else 0.0
         self.sent = 0
@@ -721,26 +744,34 @@ class MulticastStimulus(threading.Thread):
     def _open(self) -> socket.socket:
         """A socket pinned to the wired interface.
 
-        Pinned twice over, because the one mistake this feature cannot survive is the packets
-        leaving somewhere else — they would be sent perfectly, counted as sent, and never touch
-        the air. IP_MULTICAST_IF is the option that actually governs multicast egress;
-        SO_BINDTODEVICE also settles the source address and stops a default route on another
-        interface from winning. `Prober` shipped with this bug in the other direction, sending
-        every probe out of eth0 when it wanted wlan0, and it looked exactly like a dead radio.
+        SO_BINDTODEVICE is the part that matters for either destination, because the one mistake
+        this feature cannot survive is the packets leaving somewhere else — they would be sent
+        perfectly, counted as sent, and never touch the air. It settles the source address and
+        stops a default route on another interface from winning. `Prober` shipped with this bug
+        in the other direction, sending every probe out of eth0 when it wanted wlan0, and it
+        looked exactly like a dead radio.
+
+        255.255.255.255 needs SO_BROADCAST and nothing else: it is never routed, so binding to
+        the device is the whole of the delivery decision. A multicast destination additionally
+        needs IP_MULTICAST_IF, which is the option that actually governs multicast egress —
+        SO_BINDTODEVICE alone does not.
         """
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        # struct ip_mreqn { in_addr imr_multiaddr; in_addr imr_address; int imr_ifindex; } —
-        # selecting by index rather than by address, so this needs no IP on the interface.
-        index = socket.if_nametoindex(self.iface)
-        sock.setsockopt(
-            socket.IPPROTO_IP,
-            socket.IP_MULTICAST_IF,
-            struct.pack("@4s4si", b"\x00" * 4, b"\x00" * 4, index),
-        )
         sock.setsockopt(socket.SOL_SOCKET, SO_BINDTODEVICE, self.iface.encode() + b"\x00")
-        # One hop. This is for the local segment and has no business past the first router.
-        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
-        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0)
+        if is_multicast(self.target):
+            # struct ip_mreqn { in_addr imr_multiaddr; in_addr imr_address; int imr_ifindex; } —
+            # selecting by index rather than by address, so this needs no IP on the interface.
+            index = socket.if_nametoindex(self.iface)
+            sock.setsockopt(
+                socket.IPPROTO_IP,
+                socket.IP_MULTICAST_IF,
+                struct.pack("@4s4si", b"\x00" * 4, b"\x00" * 4, index),
+            )
+            # One hop. This is for the local segment and has no business past the first router.
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0)
+        else:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         return sock
 
     def run(self) -> None:
@@ -751,7 +782,7 @@ class MulticastStimulus(threading.Thread):
             self.failed = True
             return
 
-        target = (self.group, self.port)
+        target = (self.target, self.port)
         due = time.monotonic()
         while not self._stop.is_set():
             if not self._armed.is_set():
@@ -833,6 +864,108 @@ class RateGate:
         self.changes += 1
         self._next_change = now + self.dwell_s
         return self.armed
+
+
+@dataclass
+class StimulusVerdict:
+    """Why an armed stimulus is judged to be reaching nothing."""
+
+    sent: int
+    send_hz: float
+    detail: str
+
+
+class StimulusAudit:
+    """Decides whether an armed stimulus is actually reaching the air.
+
+    Kept free of sockets and of the clock, like the other policy objects here, because what it
+    has to get right is a judgement rather than an I/O call.
+
+    The question is *not* "are frames arriving". That is what this check used to ask — it fired
+    only when the frame count was zero — and on any access point that beacons the answer is yes
+    no matter what the stimulus does. Measured on hardware: a 25 TU beacon interval alone
+    carries 39 Hz, the stimulus was flooding 50 packets a second into an access point that
+    silently declined to air any of them, and the node reported a clean bill of health for as
+    long as anyone cared to watch. The fault it exists to name was the one shape it could not
+    see.
+
+    So compare the movement rather than the level, which needs the rate from *before* the
+    stimulus was armed. That baseline is the reason this holds state at all.
+
+    What it counts is `Node.basic_seen` — every legacy 20 MHz frame the radio saw, forwarded or
+    not — and not the forwarded frame rate, because arming the stimulus also switches the node
+    to the 20 MHz class. Measured against the forwarded rate on real hardware, a passive node
+    sitting at 1.9 Hz of full-width traffic jumped to 39.7 Hz the instant it armed and the check
+    called that a working stimulus. Every one of those frames was a beacon it had been dropping
+    a second earlier, and the stimulus was still reaching nothing at all.
+    """
+
+    def __init__(self, *, min_yield: float = STIMULUS_MIN_YIELD) -> None:
+        self.min_yield = min_yield
+        # Basic-rate frames per second over the most recent status interval, which is the
+        # baseline the next arming takes.
+        self.last_rate_hz: float | None = None
+
+        self._last_seen: int | None = None
+        self._last_at: float | None = None
+        self._armed_at: float | None = None
+        self._baseline_hz: float | None = None
+        self._armed_sent = 0
+        self._armed_seen = 0
+
+    def armed(self, now: float, sent: int, basic_seen: int) -> None:
+        """The stimulus has just been armed. Freeze what the verdict will be measured against."""
+        self._armed_at = now
+        self._baseline_hz = self.last_rate_hz
+        self._armed_sent = sent
+        self._armed_seen = basic_seen
+
+    def disarmed(self) -> None:
+        self._armed_at = None
+
+    def observe(
+        self, now: float, basic_seen: int, sent: int, interval_s: float
+    ) -> StimulusVerdict | None:
+        """One status interval. Returns a verdict the caller should warn about, or None."""
+        verdict = self._verdict(now, basic_seen, sent, interval_s)
+        if self._last_seen is not None and self._last_at is not None:
+            self.last_rate_hz = (basic_seen - self._last_seen) / max(now - self._last_at, 1e-9)
+        self._last_seen, self._last_at = basic_seen, now
+        return verdict
+
+    def _verdict(
+        self, now: float, basic_seen: int, sent: int, interval_s: float
+    ) -> StimulusVerdict | None:
+        if self._armed_at is None:
+            return None
+        # Only an interval that was armed end to end can be compared against one that was not.
+        # A mixed interval shows a half-sized gain and would cry wolf on a working stimulus.
+        if now - self._armed_at < interval_s:
+            return None
+
+        elapsed = max(now - self._armed_at, 1e-9)
+        emitted = sent - self._armed_sent
+        send_hz = emitted / elapsed
+        rate_hz = (basic_seen - self._armed_seen) / elapsed
+        if self._baseline_hz is None:
+            # Armed before the first status line, i.e. a node booted straight into `always`.
+            # There is no baseline to have, so all that can honestly be said is the weaker,
+            # older thing: packets went out and absolutely nothing came back.
+            idle = rate_hz <= 0.0
+            detail = f"nothing at all is coming back ({rate_hz:.1f} Hz of 20 MHz frames seen)"
+        else:
+            idle = rate_hz - self._baseline_hz < self.min_yield * send_hz
+            detail = (
+                f"the 20 MHz frames on the air have barely moved: {self._baseline_hz:.1f} Hz "
+                f"before arming, {rate_hz:.1f} Hz now"
+            )
+
+        # Asked and answered. This pairs with the "arming the stimulus" line, so repeating it
+        # every ten seconds would add nothing; the next arming asks again.
+        self._armed_at = None
+        if emitted <= 0 or not idle:
+            return None
+        return StimulusVerdict(sent=emitted, send_hz=send_hz, detail=detail)
 
 
 class CaptureWatchdog:
@@ -1258,6 +1391,13 @@ class Node:
         # The same for narrowband. ClassFollower compares the two to decide what this node
         # should be measuring when it is not the one generating the traffic.
         self.narrowband_seen = 0
+        # Frames seen in the class the Ethernet stimulus produces — legacy 20 MHz — whatever
+        # class this node happens to be forwarding. StimulusAudit reads it, and it has to be
+        # independent of the forwarding class because arming the stimulus changes that class in
+        # the same instant. Measured against `frames` instead, a node that switched from full
+        # width to 20 MHz on arming appeared to gain 38 Hz from the stimulus when every one of
+        # those frames was a beacon it had been dropping a moment earlier.
+        self.basic_seen = 0
 
         # Which class of frame this node is currently forwarding. False is full width — real
         # traffic. True is the 20 MHz world the Ethernet stimulus lives in. The capture loop
@@ -1298,6 +1438,12 @@ class Node:
             self.wideband_seen += 1
         elif span is not None and splittable:
             self.narrowband_seen += 1
+        # Before the class filter, and true at either width: on a capture too narrow to split
+        # there are no classes to be in and every frame is already the 20 MHz the stimulus
+        # produces. Without that second half the audit would see a counter that never moves on
+        # a 20 MHz link and report a working stimulus as dead.
+        if span is not None or not splittable:
+            self.basic_seen += 1
         if splittable and (span is not None) != self.narrowband:
             # The wrong class for the mode this node is in. Forwarding both would flip n_sub
             # from frame to frame, and the server answers a subcarrier-mask change by throwing
@@ -1417,8 +1563,8 @@ def run(args: argparse.Namespace) -> int:
     stimulus = None
     gate = None
     if args.stimulus_hz > 0:
-        stimulus = MulticastStimulus(
-            args.stimulus_iface, args.stimulus_group, args.stimulus_port, args.stimulus_hz
+        stimulus = Stimulus(
+            args.stimulus_iface, args.stimulus_target, args.stimulus_port, args.stimulus_hz
         )
         stimulus.start()
         gate = RateGate(
@@ -1429,7 +1575,7 @@ def run(args: argparse.Namespace) -> int:
         )
         log.info(
             "stimulus: %s -> %s:%d at %g Hz, mode %s (auto arms below %g Hz of real traffic)",
-            args.stimulus_iface, args.stimulus_group, args.stimulus_port,
+            args.stimulus_iface, args.stimulus_target, args.stimulus_port,
             args.stimulus_hz, args.stimulus, args.stimulus_floor_hz,
         )
 
@@ -1450,6 +1596,7 @@ def run(args: argparse.Namespace) -> int:
     # than on every wakeup. Previously this was inferred from node.narrowband, which now moves
     # for a second reason and would have desynchronised the two.
     stimulus_armed = False
+    audit = StimulusAudit()
     follower = ClassFollower(
         window_s=args.stimulus_window, dwell_s=args.stimulus_dwell
     )
@@ -1543,6 +1690,13 @@ def run(args: argparse.Namespace) -> int:
                 if armed != stimulus_armed:
                     stimulus_armed = armed
                     stimulus.arm(armed)
+                    # The rate measured just before arming is the only honest baseline there is:
+                    # beacons alone can carry 40 Hz, so "are frames arriving" says nothing about
+                    # whether the stimulus is the reason. What it moved is the question.
+                    if armed:
+                        audit.armed(now, stimulus.sent, node.basic_seen)
+                    else:
+                        audit.disarmed()
                     log.info(
                         "%s the stimulus (%s)",
                         "arming" if armed else "disarming",
@@ -1581,21 +1735,24 @@ def run(args: argparse.Namespace) -> int:
                     node.frames, rate, n_sub, node.rssi, node.link_changes, bad, unstamped,
                     node.dropped_class, extra,
                 )
-                if (
-                    stimulus is not None
-                    and stimulus_armed
-                    and stimulus.sent > 0
-                    and node.frames == 0
-                ):
+                verdict = audit.observe(
+                    now, node.basic_seen, stimulus.sent if stimulus is not None else 0,
+                    args.status_interval,
+                )
+                if verdict is not None:
                     # Emitting into a void. Worth a warning of its own because everything above
                     # looks healthy — the packets really are being sent — and the fault is a
                     # switch or access point silently declining to put them on the air.
                     log.warning(
-                        "%d stimulus packets sent and nothing came back. The access point is "
-                        "probably not flooding %s onto the wireless side: check that %s is "
-                        "bridged to the same network as the AP, that the group is inside "
-                        "224.0.0.0/24, and that the monitor radio is on the AP's channel.",
-                        stimulus.sent, args.stimulus_group, args.stimulus_iface,
+                        "%d stimulus packets sent at %.1f Hz and %s. They are leaving the host "
+                        "(confirm: tcpdump -i %s -n 'udp port %d'), so the access point is not "
+                        "putting them on the air. Check that %s is on the same segment as the "
+                        "AP and that the monitor radio is on the AP's channel. If "
+                        "--stimulus-target is a multicast group, move it back to %s: an access "
+                        "point that converts multicast to unicast sends a group only to the "
+                        "stations that joined it, and a monitor radio joins nothing.",
+                        verdict.sent, verdict.send_hz, verdict.detail, args.stimulus_iface,
+                        args.stimulus_port, args.stimulus_iface, STIMULUS_TARGET,
                     )
                 node.frames = 0
                 reported = now
@@ -1637,15 +1794,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--stimulus",
                    default=os.environ.get("CSI_STIMULUS", "auto"),
                    choices=("auto", "always", "off"),
-                   help="Ethernet multicast stimulus: arm it when the channel goes quiet "
+                   help="Ethernet broadcast stimulus: arm it when the channel goes quiet "
                         "(auto), run it unconditionally (always), or never (off)")
     p.add_argument("--stimulus-iface",
                    default=os.environ.get("CSI_STIMULUS_IFACE", "eth0"),
                    help="wired interface to emit on (default eth0)")
-    p.add_argument("--stimulus-group",
-                   default=os.environ.get("CSI_STIMULUS_GROUP", STIMULUS_GROUP),
-                   help=f"multicast group (default {STIMULUS_GROUP}; stay inside 224.0.0.0/24 "
-                        "or a snooping access point will prune it)")
+    # --stimulus-group is what this was called while the destination was necessarily a group.
+    # Kept as an alias because it is written into deployed /etc/default/csi-node files, and a
+    # node that failed to start over a renamed flag would be a worse outcome than the tidier
+    # spelling is worth.
+    p.add_argument("--stimulus-target", "--stimulus-group", dest="stimulus_target",
+                   default=(os.environ.get("CSI_STIMULUS_TARGET")
+                            or os.environ.get("CSI_STIMULUS_GROUP")
+                            or STIMULUS_TARGET),
+                   help=f"where to emit (default {STIMULUS_TARGET}). A multicast group works "
+                        "only on an access point that floods it to the wireless side; see the "
+                        "note on STIMULUS_TARGET before choosing one")
     p.add_argument("--stimulus-port", type=int,
                    default=int(os.environ.get("CSI_STIMULUS_PORT", str(STIMULUS_PORT))),
                    help=f"multicast port (default {STIMULUS_PORT})")
