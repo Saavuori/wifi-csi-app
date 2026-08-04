@@ -78,6 +78,10 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # The GHA cache backend writes through the job token. Naming any permission sets every
+      # other one to `none`, so leaving this out is what denied the cache write with "token has
+      # no writable scopes" — silently, as a warning, until the export failed on top of it.
+      actions: write
     uses: ./.github/workflows/image.yml
     with:
       # A pull request builds to prove the Containerfile still works, and publishes nothing.

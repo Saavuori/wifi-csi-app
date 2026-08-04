@@ -159,6 +159,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # See the note in ci.yml: without this the job token cannot write the build cache.
+      actions: write
     uses: ./.github/workflows/image.yml
     with:
       ref: ${{ needs.release.outputs.tag }}
