@@ -17,7 +17,7 @@
 #     --iface NAME       wireless interface (default wlan0)
 #     --ap MAC           only measure frames from this transmitter (default: the associated AP)
 #     --probe-hz N       ping rate that generates the traffic to measure (default 100)
-#     --stimulus MODE    Ethernet multicast fallback: auto, always or off (default auto)
+#     --stimulus MODE    Ethernet broadcast fallback: auto, always or off (default auto)
 #     --stimulus-iface NAME  wired interface it emits on (default eth0)
 #     --stimulus-hz N    its rate while armed (default 50)
 #     --repo URL         nexmon_csi fork to build (default: Saavuori/nexmon_csi)
