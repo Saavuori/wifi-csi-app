@@ -165,3 +165,102 @@ def test_snr_is_reported_when_the_noise_floor_is_real():
     health = NodeHealth(node_id=1)
     health.observe(_frame(rssi=-49, noise=-92), now=1000.0)
     assert health.as_dict()["snr_db"] == 43
+
+
+# -- recording retention -------------------------------------------------------------------
+
+
+def _write_session(store, label: str, size: int):
+    session = store.create(label)
+    path = store.file_for(session)
+    path.write_bytes(b"\0" * size)
+    (path.parent / (session.path + ".idx")).write_bytes(b"\0" * 16)
+    return session
+
+
+def test_prune_is_a_no_op_under_budget(tmp_path):
+    from csi.sessions import SessionStore
+
+    store = SessionStore(tmp_path)
+    _write_session(store, "a", 1000)
+    assert store.prune(10_000) == []
+    assert len(store.sorted()) == 1
+
+
+def test_prune_removes_oldest_first(tmp_path):
+    from csi.sessions import SessionStore
+
+    store = SessionStore(tmp_path)
+    oldest = _write_session(store, "oldest", 4000)
+    middle = _write_session(store, "middle", 4000)
+    newest = _write_session(store, "newest", 4000)
+    # Creation order is the age order; make it explicit so the test does not rely on clock ties.
+    oldest.started_at, middle.started_at, newest.started_at = 100.0, 200.0, 300.0
+    for s in (oldest, middle, newest):
+        store.update(s)
+
+    removed = store.prune(9000)
+    assert removed == [oldest.id]
+    assert {s.id for s in store.sorted()} == {middle.id, newest.id}
+
+
+def test_prune_never_deletes_the_session_being_written(tmp_path):
+    """Deleting the file under the recorder loses the session someone is actually watching."""
+    from csi.sessions import SessionStore
+
+    store = SessionStore(tmp_path)
+    old = _write_session(store, "old", 5000)
+    active = _write_session(store, "active", 5000)
+    old.started_at, active.started_at = 100.0, 200.0
+    for s in (old, active):
+        store.update(s)
+
+    removed = store.prune(1000, keep=active)
+    assert active.id not in removed
+    assert store.get(active.id) is not None
+
+
+def test_prune_disabled_by_a_zero_budget(tmp_path):
+    from csi.sessions import SessionStore
+
+    store = SessionStore(tmp_path)
+    _write_session(store, "a", 5000)
+    assert store.prune(0) == []
+    assert len(store.sorted()) == 1
+
+
+def test_total_bytes_reads_the_disk_not_the_metadata(tmp_path):
+    """Session.bytes is flushed periodically and lags; a retention decision cannot use it."""
+    from csi.sessions import SessionStore
+
+    store = SessionStore(tmp_path)
+    session = _write_session(store, "a", 2048)
+    session.bytes = 0  # metadata deliberately stale
+    store.update(session)
+    assert store.total_bytes() == 2048
+
+
+def test_hub_prunes_but_keeps_the_active_recording(tmp_path):
+    """The hub's own wiring, not just the store's: budget applied, active session spared."""
+    from csi.config import Settings
+    from csi.hub import Hub
+
+    settings = Settings()
+    settings.data_dir = tmp_path
+    settings.web_dir = None
+    settings.record = False
+    settings.max_disk_gb = 8000 / 1024**3  # 8000 bytes, expressed in GB
+    settings.ensure_dirs()
+
+    hub = Hub(settings)
+    old = _write_session(hub.sessions, "old", 5000)
+    old.started_at = 100.0
+    hub.sessions.update(old)
+    hub.start_recording("live")
+    active = hub.recorder.session
+    hub.sessions.file_for(active).write_bytes(b"\0" * 5000)
+
+    hub._prune_recordings()
+
+    assert hub.sessions.get(active.id) is not None, "the session being written must survive"
+    assert hub.sessions.get(old.id) is None, "the oldest must go"

@@ -4,6 +4,14 @@ Two shapes. A Raspberry Pi on a home LAN, which is what most people want and wha
 `install.sh` does in one command. Or a podman container behind Caddy, alongside the existing
 apps, which is what this server runs.
 
+## Settings worth knowing
+
+| Variable | Default | Why you might change it |
+|---|---|---|
+| `CSI_MAX_DISK_GB` | 8 | Cap on the recordings directory. A node writes roughly a gigabyte a day and the default home for it is the SD card the OS is also on, so the oldest recordings are deleted to stay under this. `0` disables pruning, which means the appliance eventually fills the card it boots from. |
+| `CSI_DROP_DC_ADJACENT` | false | Set to `true` for a Raspberry Pi node. The BCM43455 leaks its DC offset into the subcarriers either side of centre, measured at around eight times the median amplitude, and subcarrier selection ranks by variance — so the bin carrying no signal is a candidate to be chosen. An ESP32 does not have this and should leave it off. |
+| `CSI_RECORD` | true | Recording everything costs disk; losing a session you cannot repeat costs more. |
+
 ## Raspberry Pi
 
 ```sh

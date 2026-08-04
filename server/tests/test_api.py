@@ -45,7 +45,8 @@ def test_status_reports_an_empty_system(client):
     body = client.get("/api/status").json()
     assert body["nodes"] == []
     assert body["counters"]["live_frames"] == 0
-    assert body["config"]["breathing"]["window_s"] == 20.0
+    # 60 s, not the 20 s the literature suggests: see VitalsConfig.breathing().
+    assert body["config"]["breathing"]["window_s"] == 60.0
 
 
 def test_status_reports_a_node_once_it_appears(client):
@@ -176,6 +177,20 @@ def test_websocket_delivers_binary_frames(client):
         assert amp.size == 64
 
 
+def _next_frame(ws):
+    """The next binary CSI frame, skipping the JSON events that share the socket.
+
+    Metrics, node health and config echoes are text messages on the same connection, so
+    `receive_bytes()` fails with a KeyError whenever one happens to land between two frames.
+    That made this test flake roughly one run in three.
+    """
+    while True:
+        message = ws.receive()
+        payload = message.get("bytes")
+        if payload is not None:
+            return decode_frame(payload)
+
+
 def test_websocket_subscription_filters_frames(client):
     with client.websocket_connect("/ws") as ws:
         json.loads(ws.receive_text())
@@ -185,8 +200,8 @@ def test_websocket_subscription_filters_frames(client):
         assert json.loads(ws.receive_text())["type"] == "pong"
 
         feed(client.hub, 4)
-        first, _ = decode_frame(ws.receive_bytes())
-        second, _ = decode_frame(ws.receive_bytes())
+        first, _ = _next_frame(ws)
+        second, _ = _next_frame(ws)
         assert second["seq"] - first["seq"] == 2
 
 

@@ -72,10 +72,24 @@ class Settings:
     # expensive than the disk: a node at 80 Hz writes about 1 GB per day.
     record: bool = field(default_factory=lambda: _env_bool("CSI_RECORD", True))
 
+    # Cap on the recordings directory, in gigabytes; 0 disables pruning. A node writes roughly
+    # a gigabyte a day, and the default home for it is the SD card the operating system is also
+    # on. Unbounded, the appliance works for a month and then stops. Oldest recordings are
+    # deleted to stay under this — see SessionStore.prune.
+    max_disk_gb: float = field(default_factory=lambda: _env_float("CSI_MAX_DISK_GB", 8.0))
+
     # A node that says nothing for this long is reported offline.
     node_timeout_s: float = field(default_factory=lambda: _env_float("CSI_NODE_TIMEOUT_S", 5.0))
 
-    preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
+    preprocess: PreprocessConfig = field(
+        default_factory=lambda: PreprocessConfig(
+            # Settable from the environment because it is a property of the *hardware* a node
+            # uses, not a preference: the BCM43455 leaks DC into k = +/-1 and an ESP32 does
+            # not. Left UI-only it was lost on every container restart, which meant the fix
+            # had to be reapplied by hand after each deploy and silently was not.
+            drop_dc_adjacent=_env_bool("CSI_DROP_DC_ADJACENT", False),
+        )
+    )
     presence: PresenceConfig = field(default_factory=PresenceConfig)
     breathing: VitalsConfig = field(default_factory=VitalsConfig.breathing)
     heart: VitalsConfig = field(default_factory=VitalsConfig.heart)
