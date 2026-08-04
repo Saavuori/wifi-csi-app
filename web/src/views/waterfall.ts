@@ -21,7 +21,19 @@
 //
 // The remaining step from the plan is moving the drawing itself into the worker with
 // OffscreenCanvas. Steps 1-3 remove essentially all of the pain; that one is the follow-up.
+//
+// The columns are also kept as data, in a `ColumnStore`, and not only as pixels. Pixels alone
+// made two things impossible that a user reasonably expects: opening the page drew an empty
+// plot that took a screen-width of frames to say anything, and whatever had scrolled off the
+// left was gone. So the view backfills the server's ring on mount and can be scrubbed back
+// through what it holds. Point 2 above survives intact — following live is still an offset blit
+// of only the new columns; a full repaint happens when the user is scrubbing, where it costs
+// one frame per change of position rather than one per column.
+//
+// Rewind here is bounded by memory, which is minutes. Going back further is what replaying a
+// recorded session is for, and that path already exists.
 
+import { ColumnStore } from "../lib/columns";
 import { colormap, colormapGradient, type ColormapName } from "../lib/colormap";
 import {
   ICONS,
@@ -36,6 +48,7 @@ import {
   viewLayout,
 } from "../lib/dom";
 import type { FrameBatch, Metrics } from "../lib/messages";
+import { decodeHistory } from "../lib/protocol";
 import { store } from "../lib/store";
 import type { View } from "./view";
 
@@ -76,13 +89,25 @@ export function waterfallView(): View {
   let variance: Float32Array | null = null;
   let nSub = 0;
 
-  // Columns waiting to be drawn on the next animation frame.
-  let queue: { amp: Float32Array; agc: boolean }[] = [];
+  // Everything the view has seen, as data rather than pixels. Rebuilt when the subcarrier count
+  // changes, because a column is a fixed-width row in it.
+  let columns: ColumnStore | null = null;
+  // Columns appended since the last repaint — the width of the incremental blit while live.
+  let pending = 0;
+  // Device timestamp of the newest column held, so backfill and the live stream can overlap
+  // without drawing the same moment twice.
+  let newestAt = Number.NEGATIVE_INFINITY;
+
   let scratch: ImageData | null = null;
-  let running = true;
-  let framesDrawn = 0;
   let lastAgcAt = 0;
   let selected = new Set<number>();
+
+  // Transport. `live` follows the newest column; otherwise `viewEnd` is the logical index of the
+  // newest *visible* column and the canvas is repainted from the store whenever it moves.
+  let live = true;
+  let viewEnd = 0;
+  let repaintWanted = false;
+  let scrubbing = false;
 
   // EMA coefficient for the running statistics. ~4 s at 80 Hz: long enough to be a stable
   // reference, short enough to follow the slow channel drift the plan warns about over hours.
@@ -111,38 +136,70 @@ export function waterfallView(): View {
     }
   }
 
-  function drawColumns() {
-    if (context === null || queue.length === 0 || mean === null || variance === null) {
-      return;
+  function resetColumns(count: number) {
+    columns = new ColumnStore(count);
+    newestAt = Number.NEGATIVE_INFINITY;
+    pending = 0;
+    viewEnd = 0;
+    live = true;
+    // What is on the canvas belongs to the history just discarded. Without a full repaint the
+    // incremental path would scroll it along a column at a time, mixing two different rooms.
+    repaintWanted = true;
+  }
+
+  function ensureStore(count: number) {
+    if (columns === null || columns.nSub !== count) resetColumns(count);
+  }
+
+  /**
+   * Append one column, unless it is one we already hold.
+   *
+   * The backfill and the live stream overlap by however long the request took, so without this
+   * the same half-second of room is drawn twice, side by side, as a visible seam. A timestamp
+   * far *behind* the newest is a different thing — the node rebooted and its clock restarted —
+   * and the history before that reset no longer joins onto what follows.
+   */
+  function pushColumn(amp: Float32Array, timestamp: number, agc: boolean) {
+    if (columns === null) return;
+    if (timestamp <= newestAt) {
+      if (timestamp > newestAt - 5e6) return; // already held
+      resetColumns(columns.nSub);
     }
 
-    const width = canvas.width;
+    const before = columns.count;
+    updateStats(amp, before > 0);
+    columns.push(amp, timestamp, agc);
+    newestAt = timestamp;
+    pending += 1;
+    // A full ring drops its oldest column per push, which shifts every logical index down by
+    // one. While scrubbing, the position has to move with the data or the view slides forward
+    // on its own.
+    if (!live && columns.count === before) viewEnd = Math.max(0, viewEnd - 1);
+    if (agc) lastAgcAt = performance.now();
+  }
+
+  /** Render `count` columns starting at logical index `from` into the canvas at `destX`. */
+  function blit(from: number, count: number, destX: number) {
+    if (context === null || columns === null || count <= 0) return;
+    if (mean === null || variance === null) return;
+
     const height = canvas.height;
-    const columns = Math.min(queue.length, width);
-    const batch = queue.slice(queue.length - columns);
-    queue = [];
-
-    // Scroll the existing image left by `columns` pixels by drawing the canvas onto itself.
-    // This is the one trick that keeps a long session cheap: history is never re-rendered.
-    context.globalCompositeOperation = "copy";
-    context.drawImage(canvas, -columns, 0);
-    context.globalCompositeOperation = "source-over";
-
-    if (scratch === null || scratch.width !== columns || scratch.height !== height) {
-      scratch = context.createImageData(columns, height);
+    if (scratch === null || scratch.width !== count || scratch.height !== height) {
+      scratch = context.createImageData(count, height);
     }
 
     const lut = colormap(options.colormap);
     const pixels = scratch.data;
     const scale = height / nSub;
 
-    for (let c = 0; c < columns; c++) {
-      const { amp, agc } = batch[c];
+    for (let c = 0; c < count; c++) {
+      const amp = columns.column(from + c);
+      const agc = columns.agc(from + c);
       for (let y = 0; y < height; y++) {
         // Flip so low subcarrier indices sit at the bottom, matching the axis labels.
         const sub = Math.min(nSub - 1, Math.floor((height - 1 - y) / scale));
         const value = amp[sub];
-        const offset = (y * columns + c) * 4;
+        const offset = (y * count + c) * 4;
 
         if (!Number.isFinite(value)) {
           // A masked subcarrier — guard band, DC, or a pilot. Drawn as a gap rather than
@@ -180,8 +237,41 @@ export function waterfallView(): View {
       }
     }
 
-    context.putImageData(scratch, width - columns, 0);
-    framesDrawn += columns;
+    context.putImageData(scratch, destX, 0);
+  }
+
+  /** Follow the newest data: scroll what is drawn and paint only the columns that are new. */
+  function followLive() {
+    if (context === null || columns === null || pending === 0) return;
+    const width = canvas.width;
+    // Also bounded by what is held: a tab left in the background can accumulate more pending
+    // columns than the ring kept, and the difference would index off the front of it.
+    const count = Math.min(pending, width, columns.count);
+    pending = 0;
+
+    // Scroll the existing image left by `count` pixels by drawing the canvas onto itself. This
+    // is the one trick that keeps a long session cheap: history is not re-rendered to advance.
+    context.globalCompositeOperation = "copy";
+    context.drawImage(canvas, -count, 0);
+    context.globalCompositeOperation = "source-over";
+
+    blit(columns.count - count, count, width - count);
+    viewEnd = columns.count - 1;
+  }
+
+  /** Repaint the whole visible window from the store, for a view that has been scrubbed. */
+  function paintWindow() {
+    if (context === null || columns === null) return;
+    const width = canvas.width;
+    const end = Math.min(viewEnd, columns.count - 1);
+    const count = Math.min(width, end + 1);
+
+    // Short history is drawn against the right edge, so "now" is always the same place on
+    // screen whether the buffer is full or the app opened a moment ago.
+    context.fillStyle = "#1a1c22";
+    context.fillRect(0, 0, width, canvas.height);
+    blit(end - count + 1, count, width - count);
+    pending = 0;
   }
 
   function drawOverlay() {
@@ -241,23 +331,48 @@ export function waterfallView(): View {
   }
 
   function onFrames(batch: FrameBatch) {
-    if (!running) return;
     if (batch.nSub !== nSub) resetStats(batch.nSub);
+    ensureStore(batch.nSub);
 
     for (let i = 0; i < batch.count; i++) {
+      // `push` copies into the ring, so this view onto the transferred buffer does not outlive
+      // the call and nothing here needs its own copy.
       const amp = batch.amp.subarray(i * batch.nSub, (i + 1) * batch.nSub);
-      updateStats(amp, framesDrawn + queue.length > 0);
-      // The subarray is a view onto the transferred buffer, which lives as long as the queue
-      // entry does, so no copy is needed here.
-      queue.push({ amp, agc: batch.agc[i] === 1 });
-      if (batch.agc[i] === 1) lastAgcAt = performance.now();
+      pushColumn(amp, batch.timestamps[i], batch.agc[i] === 1);
     }
+  }
 
-    // Cap the queue at one screen width. If the tab was backgrounded there is no value in
-    // drawing a minute of history one column at a time to catch up.
-    if (queue.length > canvas.width) {
-      queue = queue.slice(queue.length - canvas.width);
+  /**
+   * Fill the view from the server's ring, so a browser that has just connected shows the last
+   * couple of minutes rather than an empty canvas that takes a screen-width of frames to say
+   * anything. Best effort: this is a nicety, and a node that has sent nothing yet answers 204.
+   */
+  async function backfill(nodeId: number) {
+    let history;
+    try {
+      const response = await fetch(`/api/nodes/${nodeId}/history`);
+      if (!response.ok || response.status === 204) return;
+      history = decodeHistory(await response.arrayBuffer());
+    } catch {
+      return; // offline, or navigated away mid-flight
     }
+    if (history === null || history === undefined || history.count === 0) return;
+    // The user may have switched nodes while the request was in flight, in which case this is
+    // the wrong room's history.
+    if (store.selectedNode.value !== nodeId) return;
+
+    // The store is replaced rather than prepended to: it is append-only, and this data is older
+    // than any live frame that arrived during the round trip. Those few columns are in the
+    // block too — the ring they came from is what produced it — so the only loss is whatever
+    // landed in the milliseconds after the server took its snapshot, and the live stream
+    // continues from there on the next frame.
+    if (history.nSub !== nSub) resetStats(history.nSub);
+    resetColumns(history.nSub);
+    for (let i = 0; i < history.count; i++) {
+      const amp = history.amp.subarray(i * history.nSub, (i + 1) * history.nSub);
+      pushColumn(amp, history.timestamps[i], history.agc[i] === 1);
+    }
+    repaintWanted = true;
   }
 
   function onMetrics(metrics: Map<number, Metrics>) {
@@ -271,13 +386,23 @@ export function waterfallView(): View {
   let animation = 0;
   function tick() {
     if (fitCanvas(canvas)) {
-      // The backing store was resized, which cleared it. History lives in the canvas, so it is
-      // simply gone; the alternative is keeping a parallel copy of every column, which costs
-      // more than a resize is worth.
-      framesDrawn = 0;
+      // Resizing the backing store clears it. The columns are held as data, so unlike before
+      // this costs a repaint rather than the history.
+      repaintWanted = true;
     }
     fitCanvas(overlay);
-    drawColumns();
+
+    // A resize, a backfill or a scrub needs the window rebuilt from the store; following live
+    // needs only the new columns. Keeping the second case incremental is the whole reason a
+    // long session stays cheap.
+    if (repaintWanted) {
+      if (live && columns !== null) viewEnd = columns.count - 1;
+      paintWindow();
+      repaintWanted = false;
+    } else if (live) {
+      followLive();
+    }
+    updateTransport();
     drawOverlay();
 
     const agcAge = (performance.now() - lastAgcAt) / 1000;
@@ -289,6 +414,98 @@ export function waterfallView(): View {
 
     animation = requestAnimationFrame(tick);
   }
+
+  // -- transport -------------------------------------------------------------------------
+  //
+  // Under the plot rather than in the display controls at the side: this is not a preference
+  // about how the data looks, it is where in the data you are, and it is the one control you
+  // reach for while watching the plot rather than while setting it up.
+
+  const scrubber = el("input", {
+    type: "range",
+    class: "waterfall-scrubber",
+    min: 0,
+    max: 0,
+    step: 1,
+    value: 0,
+    "aria-label": "Position in the buffered history",
+  });
+
+  const position = el("span", { class: "waterfall-position" }, "live");
+
+  const liveButton = el(
+    "button",
+    {
+      class: "button button-small waterfall-live",
+      type: "button",
+      title: "Jump back to the newest data and follow it",
+    },
+    "Live",
+  );
+
+  function goLive() {
+    live = true;
+    repaintWanted = true;
+  }
+
+  function seekTo(index: number) {
+    if (columns === null) return;
+    live = false;
+    viewEnd = Math.max(0, Math.min(index, columns.count - 1));
+    repaintWanted = true;
+  }
+
+  scrubber.addEventListener("input", () => seekTo(Number(scrubber.value)));
+  // While the pointer is down the input owns its own value; writing to it from the animation
+  // frame would fight the drag.
+  scrubber.addEventListener("pointerdown", () => (scrubbing = true));
+  scrubber.addEventListener("pointerup", () => (scrubbing = false));
+  scrubber.addEventListener("pointercancel", () => (scrubbing = false));
+  liveButton.addEventListener("click", goLive);
+
+  const followToggle = toggle({
+    label: "Follow live",
+    value: true,
+    onChange: (value) => (value ? goLive() : seekTo(viewEnd)),
+    hint: "Off freezes the view. The buffer keeps filling either way — scrub back with the bar under the plot",
+  });
+  // The same state as the transport bar, so the two cannot disagree: dragging the scrubber or
+  // pressing Live has to move this, or it sits there claiming the view is following live while
+  // the plot is thirty seconds behind.
+  const followInput = followToggle.querySelector("input") as HTMLInputElement | null;
+
+  function updateTransport() {
+    const count = columns?.count ?? 0;
+    const max = Math.max(0, count - 1);
+    if (live) viewEnd = max;
+
+    if (followInput !== null && followInput.checked !== live) followInput.checked = live;
+    if (!scrubbing) {
+      if (scrubber.max !== String(max)) scrubber.max = String(max);
+      if (scrubber.value !== String(viewEnd)) scrubber.value = String(viewEnd);
+    }
+    scrubber.disabled = count === 0;
+    liveButton.disabled = live;
+
+    if (live) {
+      position.textContent = "live";
+      position.classList.remove("behind");
+      return;
+    }
+    // Behind by the device clock, not by wall time: it is the one that is actually uniform, and
+    // it is the same clock the recordings and the analysis windows are measured on.
+    const behind = columns === null ? NaN : columns.span(viewEnd, count - 1);
+    position.textContent = Number.isFinite(behind) ? `−${behind.toFixed(1)} s` : "paused";
+    position.classList.add("behind");
+  }
+
+  const transport = el(
+    "div",
+    { class: "waterfall-transport" },
+    liveButton,
+    scrubber,
+    position,
+  );
 
   const controls = el(
     "div",
@@ -304,6 +521,7 @@ export function waterfallView(): View {
       onChange: (value) => {
         options.colormap = value as ColormapName;
         legend.style.background = colormapGradient(options.colormap);
+        repaintWanted = true;
       },
       hint: "Perceptually uniform maps only — a rainbow invents edges that are not in the data",
     }),
@@ -314,19 +532,30 @@ export function waterfallView(): View {
       step: 0.1,
       value: options.range,
       format: (v) => `±${v.toFixed(1)}σ`,
-      onInput: (value) => (options.range = value),
+      // Repaint rather than letting the change apply only to columns that have not been drawn
+      // yet: the point of turning contrast up is to see the feature already on screen.
+      onInput: (value) => {
+        options.range = value;
+        repaintWanted = true;
+      },
       hint: "Colour range in standard deviations from each subcarrier's running mean",
     }),
     toggle({
       label: "Per-subcarrier normalize",
       value: options.normalize,
-      onChange: (value) => (options.normalize = value),
+      onChange: (value) => {
+        options.normalize = value;
+        repaintWanted = true;
+      },
       hint: "Off shows raw amplitude — useful once, to see how much the band varies",
     }),
     toggle({
       label: "Mark AGC steps",
       value: options.showAgc,
-      onChange: (value) => (options.showAgc = value),
+      onChange: (value) => {
+        options.showAgc = value;
+        repaintWanted = true;
+      },
       hint: "Columns where the receiver changed gain; excluded from variance server-side",
     }),
     toggle({
@@ -334,11 +563,7 @@ export function waterfallView(): View {
       value: options.showSelected,
       onChange: (value) => (options.showSelected = value),
     }),
-    toggle({
-      label: "Running",
-      value: true,
-      onChange: (value) => (running = value),
-    }),
+    followToggle,
   );
 
   const legend = el("div", { class: "legend-bar" });
@@ -379,6 +604,7 @@ export function waterfallView(): View {
       // would cost a tenth of the width the waterfall spends on time.
       el("div", { class: "legend" }, el("span", {}, "high"), legend, el("span", {}, "low")),
     ),
+    transport,
   );
 
   const screen = fullscreen(plot, (on) => {
@@ -410,6 +636,8 @@ export function waterfallView(): View {
 
   let unsubscribeFrames: (() => void) | null = null;
   let unsubscribeMetrics: (() => void) | null = null;
+  let unsubscribeNode: (() => void) | null = null;
+  let backfilledNode: number | null = null;
 
   return {
     id: "waterfall",
@@ -418,13 +646,24 @@ export function waterfallView(): View {
     mount() {
       unsubscribeFrames = store.onFrames(onFrames);
       unsubscribeMetrics = store.metrics.subscribe(onMetrics);
+      // Fires immediately with the current selection, which is what backfills on open; after
+      // that it is the node switch, whose history is a different room and has to be refetched.
+      //
+      // Once per node, though. This view is reused for the life of the app, so leaving another
+      // tab and coming back remounts it — and refetching there would throw away however much
+      // scrollback the browser had accumulated and replace it with the server's two minutes.
+      unsubscribeNode = store.selectedNode.subscribe((nodeId) => {
+        if (nodeId === null || nodeId === backfilledNode) return;
+        backfilledNode = nodeId;
+        void backfill(nodeId);
+      });
       animation = requestAnimationFrame(tick);
     },
     unmount() {
       cancelAnimationFrame(animation);
       unsubscribeFrames?.();
       unsubscribeMetrics?.();
-      queue = [];
+      unsubscribeNode?.();
       // Navigating away with the plot still expanded would otherwise strand the class on the
       // document — the same failure the sheets avoid by closing on navigation. Not disposed:
       // this view instance is reused for the life of the app and will be mounted again.

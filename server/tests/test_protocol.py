@@ -227,6 +227,37 @@ def test_downlink_round_trip():
     np.testing.assert_array_equal(np.isnan(amp), ~processed.mask)
 
 
+def test_history_block_is_typed_array_aligned():
+    """The browser reads the timestamps as a Float64Array view, which throws on an offset that
+    is not a multiple of 8. The amplitudes then follow at 16 + 8n, which is 4-aligned for free."""
+    from csi.downlink import HIST_HEADER_SIZE
+
+    assert HIST_HEADER_SIZE % 8 == 0
+    for count in (0, 1, 7, 100):
+        assert (HIST_HEADER_SIZE + 8 * count) % 4 == 0
+
+
+def test_history_block_round_trip():
+    from csi.downlink import decode_history, encode_history
+    from csi.ring import FrameRing
+
+    pre = Preprocessor()
+    ring = FrameRing(64, 128)
+    for i in range(10):
+        # A plausible uptime at 80 Hz. The default in `make_frame` is a bit pattern, not a
+        # clock, and is past the 2^53 µs where float64 stops being exact.
+        ring.push(pre.process(make_frame(64, seq=i, timestamp=1_000_000 + i * 12_500)))
+
+    window = ring.latest(10)
+    meta, t_us, amp, agc = decode_history(encode_history(window, node_id=3))
+
+    assert meta == {"node_id": 3, "n_sub": 64, "count": 10}
+    assert amp.shape == (10, 64)
+    assert agc.shape == (10,)
+    np.testing.assert_array_equal(t_us, window.t_us.astype("f8"))
+    np.testing.assert_array_equal(np.isnan(amp), np.isnan(window.amp))
+
+
 def test_downlink_masked_subcarriers_are_nan_not_removed():
     """Index i must always mean subcarrier i, so the waterfall's Y axis does not shift when
     the mask changes."""

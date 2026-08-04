@@ -177,6 +177,44 @@ class SessionStore:
                 continue
         return total
 
+    def newest_data_at(self, session: Session) -> float:
+        """Wall clock of the last frame a session can contain — the age retention is keyed on.
+
+        `ended_at` is the honest answer and is written when the recorder closes. A session that
+        has none either is being written right now or was interrupted by a crash, and the two
+        are indistinguishable from the file. Falling back to `started_at` expires the crashed
+        one on schedule; the live one is spared by `keep`, which is a guard the caller holds
+        anyway and does not depend on guessing from the metadata.
+        """
+        return session.ended_at if session.ended_at is not None else session.started_at
+
+    def prune_older_than(
+        self,
+        max_age_s: float,
+        *,
+        keep: Session | None = None,
+        now: float | None = None,
+    ) -> list[str]:
+        """Delete recordings whose data is entirely older than `max_age_s`. Returns what went.
+
+        Age is measured from the *end* of a recording, so a session is deleted only once every
+        frame in it is outside the window. Measuring from the start would quietly break the
+        promise the setting makes: an eight-hour overnight run started at 23:00 would go at
+        23:00 the next day, taking with it the last eight hours of data that the window says
+        are still kept.
+        """
+        if max_age_s <= 0:
+            return []
+        cutoff = (time.time() if now is None else now) - max_age_s
+
+        removed: list[str] = []
+        for session in reversed(self.sorted()):  # oldest first, for a stable order in the log
+            if keep is not None and session.id == keep.id:
+                continue
+            if self.newest_data_at(session) <= cutoff and self.delete(session.id):
+                removed.append(session.id)
+        return removed
+
     def prune(self, budget_bytes: int, *, keep: Session | None = None) -> list[str]:
         """Delete oldest-first until the recordings fit in `budget_bytes`. Returns what went.
 

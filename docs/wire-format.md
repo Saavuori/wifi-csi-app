@@ -160,6 +160,36 @@ stable when the mask changes. Clients render `NaN` as a gap.
 Preprocessing is server-side and identical for live and replayed frames — that is what makes a
 recording a faithful stand-in for the room.
 
+### History block (HTTP, not the socket)
+
+`GET /api/nodes/{id}/history?seconds=N` returns the server's ring for one node as a single
+binary block. A client that has just connected uses it to backfill its waterfall instead of
+starting from an empty canvas and taking a screen-width of frames to show anything. `seconds`
+is clamped to `CSI_HISTORY_S`; the response is `204` when the node has sent nothing yet.
+
+```
+offset          size  field      type   notes
+0               2     magic      u16    0x4348
+2               1     version    u8     1
+3               1     node_id    u8
+4               2     n_sub      u16
+6               2     _pad       u16    zero
+8               4     count      u32    columns in this block
+12              4     _pad       u32    zero — keeps `t_us` 8-byte aligned
+16              8n    t_us       f64[count]        device µs, oldest first
+16+8n           4n·s  amp        f32[count][n_sub] row-major, one row per column
+16+8n+4n·s      n     agc        u8[count]         1 where an AGC step was detected
+```
+
+Header is 16 bytes rather than the 12 its fields need so `t_us` lands 8-byte aligned for
+`new Float64Array(buf, 16, count)`; `amp` then starts at `16 + 8·count`, which is 4-aligned for
+free. Timestamps are float64 here rather than the u64 the per-frame format uses, so the browser
+is not handed a `BigInt64Array` to unpack — exact to the microsecond for ~285 years of uptime.
+
+Per column the content is the same as the binary CSI message above, including `NaN` at masked
+subcarriers. Transposed into arrays because a client backfilling wants columns in bulk, not a
+stream of frames to reassemble.
+
 ---
 
 ## Recording container

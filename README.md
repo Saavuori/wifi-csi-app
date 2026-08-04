@@ -115,7 +115,9 @@ both worth knowing if you deploy by hand:
   `SO_RCVBUF` to this sysctl *silently*. The ~208 KB default overflows as sequence gaps with
   nothing in the logs to explain them.
 - **Where `/data` lives.** A node at 80 Hz writes about 1 GB a day. On an SD card that is a wear
-  problem as much as a capacity one — use a USB SSD, or run with `CSI_RECORD=false`.
+  problem as much as a capacity one — use a USB SSD, or run with `CSI_RECORD=false`. Recordings
+  are deleted once they are older than `CSI_MAX_AGE_H` (24 h by default), which bounds the
+  capacity side of that; the writes still happen, so the wear argument for an SSD stands.
 
 ### How many subcarriers you get
 
@@ -194,6 +196,11 @@ The horizontal bands with no data are the guard and DC subcarriers — HT20 carr
 only 52 of them are populated, so an empty stripe around index 32 is the format, not a fault. A
 Pi node fills the same view with up to 256 rows and needs no change here; `n_sub` is per frame
 and the layout tables are keyed on it.
+
+Opening the page draws the last couple of minutes immediately rather than an empty plot —
+the server hands over the ring it already keeps for the analyzers. The bar under the plot scrubs
+back through what the browser is holding, which is minutes; going back further is what replaying
+a recorded session is for.
 
 ![Node health](docs/screenshot-node-health.png)
 
@@ -406,7 +413,10 @@ Server environment variables, all optional:
 | `CSI_DATA_DIR` | `./data` | Recordings and `sessions.json` |
 | `CSI_WEB_DIR` | `../web/dist` | Built front end; unset serves the API only |
 | `CSI_RECORD` | `true` | Auto-start a recording at boot. Losing a session is far more expensive than the disk — a node at 80 Hz writes about 1 GB/day |
-| `CSI_HISTORY_S` | 120 | In-memory history per node |
+| `CSI_MAX_AGE_H` | 24 | How long a recording is kept. Age is measured from the *end* of a recording, so an overnight run survives while any part of it is still inside the window. `0` disables |
+| `CSI_ROLL_H` | 1 | How often the always-on `live` recording is closed and a new one started. This is what lets the age limit apply to it at all — one endless session never finishes. Hand-started captures never roll. `0` disables |
+| `CSI_MAX_DISK_GB` | 8 | Cap on the recordings directory, applied after the age rule as a backstop. `0` disables |
+| `CSI_HISTORY_S` | 120 | In-memory history per node. Also how far back the waterfall can be scrubbed on a freshly opened browser, since it is what backfills the view |
 | `CSI_RATE_HZ` | 80 | Expected frame rate, used for ring sizing and the health view's baseline |
 | `CSI_METRICS_HZ` | 5 | Analysis rate. Runs whether or not a browser is connected |
 | `CSI_NODE_TIMEOUT_S` | 5 | Silence after which a node reads as offline |

@@ -8,7 +8,9 @@ apps, which is what this server runs.
 
 | Variable | Default | Why you might change it |
 |---|---|---|
-| `CSI_MAX_DISK_GB` | 8 | Cap on the recordings directory. A node writes roughly a gigabyte a day and the default home for it is the SD card the OS is also on, so the oldest recordings are deleted to stay under this. `0` disables pruning, which means the appliance eventually fills the card it boots from. |
+| `CSI_MAX_AGE_H` | 24 | How long a recording is kept. What a monitor left running is asked for is the recent past, so anything whose data is entirely older than this is deleted. Age is measured from the *end* of a recording: an overnight run is kept while any part of it is still inside the window. `0` disables it and leaves only the size cap. |
+| `CSI_ROLL_H` | 1 | How often the always-on `live` recording is closed and a new one started. This is what lets `CSI_MAX_AGE_H` work at all — one endless session never finishes, so it can never age out. Hand-started captures never roll. `0` disables. |
+| `CSI_MAX_DISK_GB` | 8 | Cap on the recordings directory, applied after the age rule as a backstop for a node writing faster than a day's worth was sized for. A node writes roughly a gigabyte a day and the default home for it is the SD card the OS is also on. `0` disables pruning, which means the appliance eventually fills the card it boots from. |
 | `CSI_DROP_DC_ADJACENT` | false | Set to `true` for a Raspberry Pi node. The BCM43455 leaks its DC offset into the subcarriers either side of centre, measured at around eight times the median amplitude, and subcarrier selection ranks by variance — so the bin carrying no signal is a candidate to be chosen. An ESP32 does not have this and should leave it off. |
 | `CSI_RECORD` | true | Recording everything costs disk; losing a session you cannot repeat costs more. |
 

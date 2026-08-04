@@ -1014,6 +1014,39 @@ input[type="range"] {
   color: var(--muted);
 }
 
+/* Transport. Sits under the plot because it answers "where am I in the data", which is a
+   question you ask while looking at the plot, not while setting up how it looks. */
+.waterfall-transport {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-top: var(--s2);
+}
+
+.waterfall-transport .waterfall-scrubber {
+  flex: 1;
+  min-width: 0;
+}
+
+.waterfall-scrubber:disabled {
+  opacity: 0.4;
+}
+
+/* Fixed width and tabular figures: the readout counts up continuously while scrubbed, and a
+   proportional font makes the controls either side of it jitter as the digits change. */
+.waterfall-position {
+  font-family: var(--mono);
+  font-size: var(--t-micro);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  min-width: 6ch;
+  text-align: right;
+}
+
+.waterfall-position.behind {
+  color: var(--warn);
+}
+
 /* -- plots ------------------------------------------------------------------------------- */
 
 .plot-frame {
