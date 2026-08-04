@@ -21,7 +21,7 @@ producers into that format. Nothing downstream knows or cares which it is lookin
                 ▼
              server ───WebSocket───►  browser
              ingest                   waterfall
-             record  ◄───replay───►   motion
+             record  ◄───replay───►   motion, zones
              analyse                  breathing
 ```
 
@@ -67,7 +67,7 @@ Either way the CSI itself reaches the server over UDP, on `CSI_UDP_PORT`.
 | `firmware/` | ESP-IDF project for the node. One image, three roles, and an on-device setup page. |
 | `pi/` | The same job on a Raspberry Pi: nexmon_csi capture, same uplink format. |
 | `server/` | Python: UDP ingest, echo responder, recorder, replayer, DSP, HTTP + WebSocket. |
-| `web/` | TypeScript + canvas front end. No framework. Works on a phone, which is where the placement tuner belongs. |
+| `web/` | TypeScript + canvas front end. No framework. Works on a phone, which is where the placement tuner and the zone recorder belong. |
 | `docs/` | Wire formats. |
 | `deploy/` | Container, compose and reverse-proxy configuration. |
 
@@ -90,8 +90,8 @@ room. Both halves:
   [`pi/README.md`](pi/README.md).
 - **The server, in Docker.** Installs Docker if it is missing, raises `net.core.rmem_max`, pulls
   the arm64 image and starts it: UDP ingest, recorder, replayer, the DSP, and the web app —
-  waterfall, subcarriers, motion, breathing, heart rate, placement, sessions and node health. Open
-  `http://<pi>:8080`.
+  waterfall, subcarriers, motion, zones, breathing, heart rate, placement, sessions and node
+  health. Open `http://<pi>:8080`.
 
 `--uninstall` reverses all of it. `--help` lists the rest. Details and the compose file are in
 [`deploy/README.md`](deploy/README.md); what the Pi node does and does not measure is in
@@ -212,8 +212,8 @@ as offline. Selecting a node in the header is what picks the link the analysis r
 <img src="docs/screenshot-mobile.png" alt="The waterfall on a phone" width="320">
 
 The same app, not a cut-down one: a phone gets the identical waterfall, the identical numbers and
-the identical controls. Only the shell differs. The eight views become five tab-bar destinations
-with the remaining three behind **More**, and each view's control column — the 320 px rail on the
+the identical controls. Only the shell differs. The ten views become five tab-bar destinations
+with the remaining five behind **More**, and each view's control column — the 320 px rail on the
 desktop — becomes a bottom sheet opened by the pill above the tab bar. That last part is the
 reason for the whole layout: as a column, the controls stacked *below* a full-height plot, which
 put them off the bottom of the screen on arrival, and controls nobody scrolls to are controls
@@ -315,6 +315,7 @@ Numbered as in the build plan.
 | 4 — Motion + presence | `server/csi/dsp/{presence,selection}.py` | Implemented and tested |
 | 5 — Breathing | `server/csi/dsp/vitals.py` | Implemented and tested |
 | 6 — Heart rate | same, different band | Implemented; expect it to work only at close range on a motionless subject |
+| 7 — Zones | `server/csi/dsp/zones.py`, `server/csi/zonestore.py` | Implemented and tested against synthetic scenes; **not yet validated on hardware** |
 
 ### Exit criteria, and how to check them
 
@@ -333,6 +334,14 @@ Numbered as in the build plan.
   capture chain."
 - **Phase 4** — "flags presence/absence across the empty-room and walking recordings with no
   manual retuning between them." Asserted by `test_flags_presence_without_retuning`.
+- **Phase 7** — "three zones taught from a few examples each are told apart under leave-one-out,
+  an untaught place reads as unknown, and an empty room is never assigned a zone." Asserted by
+  `test_taught_places_are_told_apart_under_leave_one_out`,
+  `test_a_place_that_was_never_taught_reads_as_unknown` and
+  `test_an_empty_room_is_never_assigned_a_zone`. All three run against `synth.py`, so they show
+  the classifier is sound on a channel model rather than that it works in your house — the same
+  caveat `inject_breathing` exists to address for the vitals estimator, and the same one that
+  applies here until it has been run on hardware.
 
 ## What the analysis actually does
 
@@ -367,6 +376,55 @@ failure mode a node sharing an access point has and a dedicated transmitter pair
 makes a recording a faithful stand-in for the room, and it is why the recorder exists before
 any of the analysis does.
 
+## Zones: teaching it the places in your house
+
+The Zones view learns the places you care about from examples you record, then says which of
+them the current movement looks like. Create a zone, walk to it, press its button, and move
+about for twenty seconds; repeat a few times per zone, from a few different spots within it.
+
+What is compared is the **shape** of the movement across frequency, not how much of it there is:
+per-subcarrier power in the 0.25–5 Hz band, in dB about its own mean, matched against each
+zone's stored examples by cosine distance. The level is thrown away deliberately — it tracks how
+vigorously the person moved, which is a property of the person and the day. The shape is the
+Fresnel selectivity, which is what varies with position. Both of those steps were measured: with
+raw power rather than centred dB, three obviously different places sat 0.03 apart while an empty
+room sat 0.25 away, so the classifier could tell movement from stillness and nothing finer.
+
+Four things it will refuse to do, each of which would otherwise be a confident wrong answer:
+
+- **Name a zone in an empty room.** Thermal noise normalizes to a perfectly good unit vector and
+  the nearest centroid to it is always *some* definite place. Classification only runs while the
+  presence detector's motion index is above its enter threshold.
+- **Classify across a link change.** Every example is bound to the node, the bandwidth, the
+  subcarrier mask and the access point's BSSID it was recorded against. If the mesh moves the
+  node to a different access point the readout says so and names the one the examples belong to,
+  rather than comparing fingerprints from two different geometries.
+- **Pick between two zones that look the same.** The best two must differ by a fraction of the
+  distance between the model's own centroids, or the answer is `ambiguous`. Both rejection
+  thresholds are expressed that way — in units of how far apart *your* zones actually are —
+  because the absolute scale is not the same in two different rooms.
+- **Fingerprint across a hole in the stream.** Same reason the breathing estimator declines one:
+  interpolating a gap puts a ramp into the band being measured, on every subcarrier at once.
+
+The part that makes re-recording worth doing is the cross-validation. Every example carries a
+leave-one-out verdict — held out, which zone would it be classified as — so an example recorded
+in the wrong place, or while nobody was really moving, shows up as itself rather than as a vague
+sense that the feature is not working. Deleting it is then an informed act, which is the whole
+loop the feature is built around. When the confusion runs *both* ways between a pair of zones,
+the view says they cannot be told apart on this link: more examples will not fix that, and the
+answer is to move the node, lock to a different access point, or accept that they are one zone.
+
+Examples live in `data/zones/` with their own budget (`CSI_ZONES_MAX_MB`) and are never touched
+by the recordings retention sweep — a rolling capture is right to delete when the disk fills, and
+training data someone walked into the kitchen to record is not. Reaching the budget refuses the
+next recording rather than quietly deleting an older one. The raw window is what is stored, so
+improving the feature extractor recomputes from disk instead of asking you to re-record the
+house; `FEATURE_VERSION` in `dsp/zones.py` is what triggers that.
+
+A zone recording is not a session: it does not go through the recorder, and nothing is diverted
+from the ingest path. The ring already holds two minutes of history per node, so "record an
+example" is a countdown — time to walk there — and then a snapshot off that ring.
+
 ## Two things measured during development
 
 Both are commented at the code that depends on them, and both were found by running the
@@ -383,8 +441,8 @@ pipeline rather than by reading it:
 ## Tests
 
 ```sh
-.venv/bin/python -m pytest server/tests      # 129 tests
-.venv/bin/python -m pytest pi/tests          # 46 tests, no Pi needed
+.venv/bin/python -m pytest server/tests      # 221 tests
+.venv/bin/python -m pytest pi/tests          # 98 tests, no Pi needed
 firmware/scripts/run_host_tests.sh           # ring buffer + wire layout, no hardware needed
 cd web && npm run build                      # typecheck + bundle
 ```
@@ -410,7 +468,7 @@ Server environment variables, all optional:
 | `CSI_HTTP_PORT` | 8080 | API and web app |
 | `CSI_HTTP_HOST` | `0.0.0.0` | Set to `127.0.0.1` behind a reverse proxy; there is no authentication |
 | `CSI_ECHO_PORT` | unset | Opens the UDP echo responder the probe bounces off. Off by default: a port that reflects whatever it is sent should not be open unless something needs it |
-| `CSI_DATA_DIR` | `./data` | Recordings and `sessions.json` |
+| `CSI_DATA_DIR` | `./data` | Recordings and `sessions.json`, and the zone examples under `zones/` |
 | `CSI_WEB_DIR` | `../web/dist` | Built front end; unset serves the API only |
 | `CSI_RECORD` | `true` | Auto-start a recording at boot. Losing a session is far more expensive than the disk — a node at 80 Hz writes about 1 GB/day |
 | `CSI_MAX_AGE_H` | 24 | How long a recording is kept. Age is measured from the *end* of a recording, so an overnight run survives while any part of it is still inside the window. `0` disables |
@@ -420,6 +478,7 @@ Server environment variables, all optional:
 | `CSI_RATE_HZ` | 80 | Expected frame rate, used for ring sizing and the health view's baseline |
 | `CSI_METRICS_HZ` | 5 | Analysis rate. Runs whether or not a browser is connected |
 | `CSI_NODE_TIMEOUT_S` | 5 | Silence after which a node reads as offline |
+| `CSI_ZONES_MAX_MB` | 200 | Cap on `data/zones/`. Separate from the recordings budget and never pruned: reaching it refuses the next example rather than deleting an older one |
 
 There is no authentication on the UDP port — anything that can reach it can inject frames. On a
 home LAN that is fine; over the open internet it is not, and the answer is a tunnel rather than
@@ -427,12 +486,20 @@ adding a shared secret to a device with no operator.
 
 ## What this will and won't do
 
-**Will:** motion detection, room-level presence, breathing rate at tuned positions, an overnight
-activity record, a genuinely nice CSI visualization tool.
+**Will:** motion detection, room-level presence, breathing rate at tuned positions, movement in
+zones you have taught it by example, an overnight activity record, a genuinely nice CSI
+visualization tool.
 
 **Won't:** localization, direction, reliable multi-person counting, pose. Those need multiple
 antennas on one radio or a much denser mesh. Single-link amplitude-only is one scalar view of
 the room.
+
+Zones are worth separating from that "won't" carefully, because they look like localization and
+are not. Nothing computes a position: you record examples of moving in each place you care
+about, and the classifier answers with the taught zone whose recordings the live movement most
+resembles. It follows that it can only separate places your recordings separate — two spots at
+similar geometry relative to the node/access-point line produce near-identical fingerprints, and
+the app tells you which pairs those are rather than guessing between them forever.
 
 **The link is shared.** The far end is an access point serving the whole house, so the sample
 rate and the reply yield depend on how busy it is. Expect Phase 1's "gaps under 1%" to be harder

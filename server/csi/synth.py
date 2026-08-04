@@ -69,6 +69,18 @@ class SceneConfig:
     motion: float = 0.0
     motion_speed_ms: float = 1.2
 
+    # Where that scatterer is, and how far it sweeps. These exist so a test can generate two
+    # *different* places in the room rather than two recordings of the same one: path length
+    # sets which subcarriers the moving reflection interferes with constructively, so changing
+    # it changes the shape of the perturbation across frequency, which is the whole basis of
+    # zone fingerprinting. Nothing in the product sets them — the defaults reproduce the single
+    # geometry that was hardcoded here before.
+    motion_distance_m: float = 4.0
+    motion_span_m: float = 1.5
+    motion_sweep_hz: float = 0.25
+    # Amplitude of the moving scatterer relative to the direct path, before `motion` scales it.
+    motion_amplitude: float = 0.6
+
     noise_db: float = -28.0  # relative to the direct path
     rssi_dbm: int = -52
     noise_floor_dbm: int = -92
@@ -151,8 +163,12 @@ class Scene:
             # A scatterer sweeping back and forth through the link. Its distance changes by
             # metres rather than millimetres, so it dominates and smears across all subcarriers
             # — which is exactly what walking looks like on a waterfall.
-            d = 4.0 + 1.5 * math.sin(2 * math.pi * 0.25 * t_s) + cfg.motion_speed_ms * 0.05 * t_s
-            h += cfg.motion * 0.6 * np.exp(-2j * math.pi * self.freqs * d / C)
+            d = (
+                cfg.motion_distance_m
+                + cfg.motion_span_m * math.sin(2 * math.pi * cfg.motion_sweep_hz * t_s)
+                + cfg.motion_speed_ms * 0.05 * t_s
+            )
+            h += cfg.motion * cfg.motion_amplitude * np.exp(-2j * math.pi * self.freqs * d / C)
 
         return h
 

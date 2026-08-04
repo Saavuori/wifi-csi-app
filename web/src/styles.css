@@ -384,7 +384,7 @@ input[type="text"]:focus {
 
 /* -- tab bar ----------------------------------------------------------------------------- */
 
-/* Five fixed destinations, no horizontal scrolling. The previous bar held all eight views and
+/* Five fixed destinations, no horizontal scrolling. The previous bar held every view and
    scrolled, which meant three of them were off-screen and, in practice, undiscoverable — the
    selected tab had to be scrolled into view programmatically just to prove a tap had worked. */
 
@@ -1257,6 +1257,238 @@ input[type="range"] {
   font-size: 14px;
 }
 
+/* -- zones ------------------------------------------------------------------------------- */
+
+/* A panel's own content column, for panels whose body is not a `.controls` stack. */
+.panel-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+/* One row per zone: name, a bar for its distance, the number. Every zone is shown, not just the
+   winner — two bars of nearly equal length is a different problem from one long bar, and the two
+   want different fixes. */
+.zone-score {
+  display: grid;
+  grid-template-columns: minmax(0, 7em) 1fr minmax(0, 4em);
+  align-items: center;
+  gap: var(--s2);
+  font-size: var(--t-label);
+}
+
+.zone-score-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.zone-score-value {
+  font-family: var(--mono);
+  font-size: var(--t-micro);
+  color: var(--muted);
+  text-align: right;
+}
+
+.zone-score-track {
+  height: 8px;
+  border-radius: var(--r-pill);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.zone-score-fill {
+  display: block;
+  height: 100%;
+  background: var(--line-bright);
+}
+
+/* Nearest wins, so the shortest bar is the answer — coloured rather than relying on length. */
+.zone-score-best {
+  background: var(--good);
+}
+
+.zone-capture {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  align-items: center;
+  text-align: center;
+}
+
+.zone-capture-head {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+/* Readable from across the room, which is where the person reading it is standing. */
+.zone-capture-count {
+  font-family: var(--display);
+  font-size: 56px;
+  line-height: 1.1;
+  font-weight: 600;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.zone-capture > .zone-score-track {
+  width: 100%;
+  height: 10px;
+}
+
+.zone-error {
+  margin: 0;
+  font-size: var(--t-label);
+  line-height: 1.6;
+  color: var(--bad);
+}
+
+.chip-large {
+  min-height: 48px;
+  padding: var(--s2) var(--s5);
+  font-size: 15px;
+}
+
+.zone-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+
+.zone {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding: var(--s3);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+
+.zone-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex-wrap: wrap;
+}
+
+.zone-head > .session-label {
+  flex: 1;
+  min-width: 8em;
+  width: auto;
+}
+
+.zone-accuracy {
+  font-family: var(--mono);
+  font-size: var(--t-micro);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.zone-samples {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.zone-sample {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s2) var(--s3);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line-bright);
+  border-radius: var(--r-md);
+  flex-wrap: wrap;
+}
+
+/* The leave-one-out verdict, carried on the example itself. This is what makes deleting one a
+   decision rather than a guess. */
+.zone-sample-correct {
+  border-left-color: var(--good);
+}
+
+.zone-sample-wrong {
+  border-left-color: var(--bad);
+}
+
+.zone-sample-only-sample,
+.zone-sample-unusable {
+  border-left-color: var(--warn);
+}
+
+.zone-sample-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+
+.zone-sample-meta {
+  font-family: var(--mono);
+  font-size: var(--t-micro);
+  line-height: 1.5;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.zone-sample-verdict {
+  font-size: var(--t-label);
+}
+
+.zone-sample-warn {
+  font-size: var(--t-label);
+  line-height: 1.5;
+  color: var(--warn);
+}
+
+.zone-warning {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding: var(--s3);
+  background: var(--panel-2);
+  border: 1px solid var(--warn);
+  border-radius: var(--r-md);
+}
+
+/* A wide table must scroll inside its own box rather than making the page scroll sideways. */
+.zone-matrix-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.zone-matrix {
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: var(--t-micro);
+}
+
+.zone-matrix th,
+.zone-matrix td {
+  border: 1px solid var(--line);
+  padding: var(--s1) var(--s2);
+  text-align: center;
+  white-space: nowrap;
+}
+
+.zone-matrix th {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.zone-cell-good {
+  color: var(--good);
+}
+
+.zone-cell-bad {
+  color: var(--bad);
+}
+
 /* -- node health ------------------------------------------------------------------------- */
 
 .node-grid {
@@ -1584,7 +1816,7 @@ html.has-fullscreen .tune {
 /* -- desktop ----------------------------------------------------------------------------- */
 
 /* Everything below turns the phone shell back into a windowed instrument: the tab bar becomes a
-   sidebar with all eight views, the control sheet becomes a fixed rail, and the density goes up
+   sidebar with every view, the control sheet becomes a fixed rail, and the density goes up
    because a mouse does not need 44 px of anything.
 
    Height is part of the condition, not just width. A phone turned sideways is 844 px wide and

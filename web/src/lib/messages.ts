@@ -65,6 +65,25 @@ export interface SelectionState {
   gated_out: number[];
 }
 
+/**
+ * Which taught zone the current movement looks like.
+ *
+ * Six of the seven states are not a zone, and that is the point — a classifier that always names
+ * somewhere is right by chance. `idle` means nothing is moving, `untrained` means no examples
+ * exist, `stale` means the link has changed since they were recorded, `settling` means the vote
+ * has not converged, `unknown` means it matches nothing taught, and `ambiguous` means two zones
+ * are too close to call apart. `reason` carries the explanation for the first three.
+ */
+export interface ZoneState {
+  state: "matched" | "unknown" | "ambiguous" | "idle" | "settling" | "untrained" | "stale";
+  zone_id?: string | null;
+  distance?: number;
+  /** Null when only one zone is taught, so there is no runner-up to be ahead of. */
+  margin?: number | null;
+  scores?: { zone_id: string; distance: number }[];
+  reason?: string;
+}
+
 export interface Metrics {
   type: "metrics";
   t: number;
@@ -84,6 +103,78 @@ export interface Metrics {
   placement?: { breathing_snr_db: number; heart_snr_db: number };
   selection?: SelectionState;
   variance?: { subcarriers: number[]; values: number[]; agc_fraction: number };
+  zone?: ZoneState;
+}
+
+export interface Zone {
+  id: string;
+  name: string;
+  created_at: number;
+  notes: string;
+}
+
+export interface ZoneSample {
+  id: string;
+  zone_id: string;
+  node_id: number;
+  recorded_at: number;
+  duration_s: number;
+  frames: number;
+  rate_hz: number;
+  n_sub: number;
+  mask_key: string;
+  src_mac: string;
+  channel: number;
+  /** Median motion index over the capture, and the presence enter threshold it was measured
+   *  against. `quiet` is derived from the two server-side, and is only as meaningful as the
+   *  detector's calibration was. `motion_enter` of 0 means it was never measured, and then
+   *  `quiet` is always false. */
+  motion_median: number;
+  motion_enter: number;
+  quiet: boolean;
+  bytes: number;
+  /** Leave-one-out verdict. `only-sample` means its zone had no other example to score against. */
+  verdict: "correct" | "wrong" | "only-sample" | "unusable" | "unscored";
+  predicted: string | null;
+}
+
+export interface ZoneAccuracy {
+  samples: number;
+  scored: number;
+  correct: number;
+  accuracy: number | null;
+}
+
+/** A capture in flight: a countdown to walk there, then the window taken off the ring. */
+export interface ZoneCapture {
+  zone_id: string;
+  zone_name: string;
+  node_id: number;
+  duration_s: number;
+  countdown_s: number;
+  phase: "countdown" | "recording" | "saving";
+  remaining_s: number;
+  started_at: number;
+  link_epoch: number;
+}
+
+export interface ZoneCaptureResult {
+  ok: boolean;
+  error?: string;
+  sample?: ZoneSample;
+}
+
+export interface ZoneReport {
+  zones: Zone[];
+  samples: ZoneSample[];
+  accuracy: Record<string, ZoneAccuracy>;
+  confusion: Record<string, Record<string, number>>;
+  /** Zone pairs mistaken for each other in *both* directions — more examples will not fix it. */
+  indistinguishable: { zones: string[]; count: number }[];
+  bytes: number;
+  max_bytes: number;
+  feature_version: number;
+  capture: ZoneCapture | null;
 }
 
 export interface Session {
@@ -145,6 +236,15 @@ export interface ServerConfig {
     band: [number, number];
     n_subcarriers: number;
     gate_quantile: number;
+  };
+  zones: {
+    window_s: number;
+    sample_s: number;
+    band: [number, number];
+    vote_s: number;
+    reject_sigma: number;
+    reject_separation_frac: number;
+    margin_frac: number;
   };
 }
 
@@ -219,6 +319,7 @@ export interface Snapshot {
   layout: Layout | null;
   recording: Session | null;
   replay: ReplayState | null;
+  zone_capture: ZoneCapture | null;
   counters: {
     live_frames: number;
     replay_frames: number;
@@ -237,6 +338,8 @@ export type ServerEvent =
   | { type: "replay"; replay: ReplayState | null; session_id?: string }
   | { type: "config"; config: ServerConfig }
   | { type: "node_control"; control: NodeControl }
+  | { type: "zones" }
+  | { type: "zone_capture"; capture: ZoneCapture | null; result?: ZoneCaptureResult }
   | { type: "sessions_pruned"; session_ids: string[] }
   | { type: "recalibrated"; node_id: number | null }
   | { type: "pong"; t: number };

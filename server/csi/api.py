@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 from typing import Any
 
 from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -200,6 +201,76 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         hub.sessions.update(session)
         return {"session": session.as_dict(), "bad_records": summary["bad"]}
 
+    # -- zones ----------------------------------------------------------------------------
+
+    @app.get("/api/zones")
+    async def list_zones() -> dict:
+        return {**hub.zones.report(), "capture": hub.zone_capture_state()}
+
+    @app.post("/api/zones")
+    async def create_zone(body: dict = Body(...)) -> dict:
+        name = str(body.get("name") or "").strip()
+        if not name:
+            raise HTTPException(400, "a zone needs a name")
+        return {"zone": hub.zones.create_zone(name, str(body.get("notes") or "")).as_dict()}
+
+    @app.patch("/api/zones/{zone_id}")
+    async def edit_zone(zone_id: str, body: dict = Body(...)) -> dict:
+        zone = hub.zones.update_zone(
+            zone_id,
+            name=str(body["name"]) if "name" in body else None,
+            notes=str(body["notes"]) if "notes" in body else None,
+        )
+        if zone is None:
+            raise HTTPException(404, "no such zone")
+        return {"zone": zone.as_dict()}
+
+    @app.delete("/api/zones/{zone_id}")
+    async def delete_zone(zone_id: str) -> dict:
+        if hub.zone_capture_state() is not None:
+            raise HTTPException(409, "a zone capture is running; cancel it first")
+        if not await asyncio.to_thread(hub.zones.delete_zone, zone_id):
+            raise HTTPException(404, "no such zone")
+        hub.broadcast({"type": "zones"})
+        return {"ok": True}
+
+    @app.post("/api/zones/{zone_id}/samples")
+    async def record_zone_sample(zone_id: str, body: dict = Body(default={})) -> dict:
+        """Start a countdown, then take an example off the node's ring."""
+        node_id = body.get("node_id")
+        if node_id is None:
+            raise HTTPException(400, "node_id is required — a fingerprint belongs to one link")
+        try:
+            node_id = int(node_id)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, "node_id must be an integer") from exc
+        _check_node_id(node_id)
+
+        duration_s = _bounded(body.get("duration_s"), 2.0, 300.0, hub.settings.zones.sample_s)
+        countdown_s = _bounded(body.get("countdown_s"), 0.0, 120.0, 5.0)
+        try:
+            capture = hub.start_zone_capture(
+                zone_id, node_id, duration_s=duration_s, countdown_s=countdown_s
+            )
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(404, "no such zone") from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"capture": capture}
+
+    @app.post("/api/zones/capture/cancel")
+    async def cancel_zone_capture() -> dict:
+        return {"cancelled": await hub.cancel_zone_capture()}
+
+    @app.delete("/api/zones/{zone_id}/samples/{sample_id}")
+    async def delete_zone_sample(zone_id: str, sample_id: str) -> dict:
+        if not await asyncio.to_thread(hub.zones.delete_sample, sample_id):
+            raise HTTPException(404, "no such example")
+        hub.broadcast({"type": "zones"})
+        return {"ok": True}
+
     # -- replay ---------------------------------------------------------------------------
 
     @app.post("/api/sessions/{session_id}/replay")
@@ -302,6 +373,25 @@ def _check_node_id(node_id: int) -> None:
     for it would create a phantom node the UI then dutifully renders."""
     if not 1 <= node_id <= 254:
         raise HTTPException(400, "node_id must be 1..254")
+
+
+def _bounded(value: Any, minimum: float, maximum: float, default: float) -> float:
+    """A number from a client, clamped into range, or the default if it is not one.
+
+    Clamping rather than refusing, unlike `Hub.update_config`. The difference is what the number
+    does: a config value is echoed back and rendered, so a silently adjusted one would make the
+    UI disagree with what was asked for. These two are the length of a countdown and the length
+    of a capture, both of which the client is told about in the very next progress broadcast.
+    """
+    if value is None or isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return default
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(number):
+        return default
+    return min(max(number, minimum), maximum)
 
 
 def _node_id(value: Any) -> int | None:
