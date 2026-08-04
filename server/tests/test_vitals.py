@@ -318,3 +318,31 @@ def test_gated_estimator_says_why_it_is_silent(build_ring):
     est = _gate(window_s=20.0, stability_window_s=90.0)
     assert est.estimate(ring) is None
     assert est.last_rejection is not None
+
+
+def test_gate_tolerance_scales_with_the_rate():
+    """1.5 BPM is a tenth of a breath rate and a fortieth of a pulse. An absolute tolerance
+    would reject a perfect cardiac measurement for varying by as much as a heart varies."""
+    est = _gate(stability_window_s=90.0, stability_sd_bpm=1.5, stability_sd_frac=0.05)
+    # Around 60 BPM the tolerance is 3.0, so a 2 BPM spread is acceptable...
+    ok = False
+    for i in range(20):
+        ok, _ = est._stable(i * 10.0, 60.0 + (2.5 if i % 2 else -2.5))
+    assert ok is True
+
+    # ...while the same absolute spread around 15 BPM is not, where the floor of 1.5 rules.
+    est2 = _gate(stability_window_s=90.0, stability_sd_bpm=1.5, stability_sd_frac=0.05)
+    ok2 = True
+    for i in range(20):
+        ok2, _ = est2._stable(i * 10.0, 15.0 + (2.5 if i % 2 else -2.5))
+    assert ok2 is False
+
+
+def test_gate_floor_applies_at_low_rates():
+    """The fraction alone would make the gate absurdly strict at the bottom of the band."""
+    est = _gate(stability_window_s=90.0, stability_sd_bpm=1.5, stability_sd_frac=0.05)
+    ok = False
+    for i in range(20):
+        ok, _ = est._stable(i * 10.0, 6.0 + (1.0 if i % 2 else -1.0))
+    # 5% of 6 BPM is 0.3; the 1.5 floor is what lets a real 6 BPM breath through.
+    assert ok is True

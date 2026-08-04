@@ -18,7 +18,6 @@ produces a signal of that size is a separate question that needs a person.
 from __future__ import annotations
 
 import argparse
-import math
 from pathlib import Path
 
 import numpy as np

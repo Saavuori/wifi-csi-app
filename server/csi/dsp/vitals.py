@@ -86,8 +86,9 @@ class VitalsConfig:
     # So this is the discriminator, and without it the estimator reports a confident number for
     # an empty room — on this hardware, one that wandered 6.8 to 23.3 BPM window to window while
     # never dropping its confidence below 0.25.
-    # Chosen from the trade-off surface rather than picked. Sweeping both against the same real
-    # recording, with and without a known 0.6x-RMS respiration signal on top:
+    #
+    # The two numbers are chosen from the trade-off surface rather than picked. Sweeping both
+    # against the same real recording, with and without a known 0.6x-RMS respiration signal:
     #
     #     window  sd  |  false positives  |  published when real   error
     #        30  1.5  |             30%   |            21%          0.19
@@ -103,6 +104,13 @@ class VitalsConfig:
     # would not be, because the safe setting has to be the default.
     stability_window_s: float = 90.0
     stability_sd_bpm: float = 1.5
+    # ...and as a fraction of the rate itself, whichever is larger. An absolute threshold does
+    # not mean the same thing in both bands: 1.5 BPM is a tenth of a 15 BPM breath and a
+    # fortieth of a 60 BPM pulse, so the same number is a reasonable tolerance for one and an
+    # impossible one for the other. Heart rate genuinely varies by more than 1.5 BPM over a
+    # minute and a half — that is what heart rate variability is — so an absolute gate would
+    # reject a perfect cardiac measurement for doing exactly what a heart does.
+    stability_sd_frac: float = 0.05
 
     @classmethod
     def breathing(cls) -> VitalsConfig:
@@ -118,6 +126,13 @@ class VitalsConfig:
         # 5 s, because a 1 s window may contain zero heartbeats. Shorter than breathing because
         # the cardiac signal only survives while the subject is motionless anyway, and a long
         # window makes that requirement harder to meet.
+        #
+        # Expect this to publish nothing on 64-subcarrier hardware, and treat that as correct.
+        # Measured on a real Pi capture with the gate off, it produced 120 estimates with a
+        # standard deviation of 11.9 BPM spanning 48 to 108 — three quarters of its own band —
+        # at a mean confidence of 0.11. A steady-looking 67 BPM built entirely out of noise. The
+        # gate silences it, which is the honest output: the module docstring above already says
+        # the cardiac result is set by the subcarrier count, and this hardware does not have it.
         return cls(band=HEART_BAND, window_s=5.0, n_subcarriers=12)
 
 
@@ -192,7 +207,10 @@ class VitalsEstimator:
         if len(values) < 3 or span < 0.5 * cfg.stability_window_s:
             return False, float("inf")
         sd = float(np.std(values))
-        return sd <= cfg.stability_sd_bpm, sd
+        # Scaled to the rate being measured, floored by the absolute term so a very low rate
+        # cannot make the gate arbitrarily strict.
+        tolerance = max(cfg.stability_sd_bpm, cfg.stability_sd_frac * float(np.median(values)))
+        return sd <= tolerance, sd
 
     def estimate(self, history: History) -> VitalsResult | None:
         cfg = self.config
