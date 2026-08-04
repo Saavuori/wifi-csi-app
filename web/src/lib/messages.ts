@@ -39,7 +39,15 @@ export interface PresenceState {
 
 export interface VitalsState {
   bpm: number;
+  /**
+   * Share of in-band energy in the peak. Kept because it describes the spectrum, but it is not
+   * a trust score: measured against a known signal on real hardware it ran *higher* for noise
+   * (0.47) than for a correct detection (0.36). Judge an estimate by `stability_sd`.
+   */
   confidence: number;
+  /** Spread of the recent run of estimates, in BPM, and the tolerance it had to meet. */
+  stability_sd: number;
+  stability_tolerance: number;
   snr_db: number;
   band: [number, number];
   window_s: number;

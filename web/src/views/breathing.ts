@@ -51,17 +51,22 @@ export function vitalsView(band: Band): View {
     }
 
     bpmValue.textContent = latest.bpm.toFixed(1);
-    // Confidence is the share of in-band energy sitting in the peak, so it says how much this
-    // is one line rather than a hump. Low confidence with a plausible number means do not
-    // believe the number.
-    const quality =
-      latest.confidence > 0.35 ? "good" : latest.confidence > 0.18 ? "warn" : "bad";
+    // Led by stability, not by confidence. Confidence is the share of in-band energy in the
+    // peak, which sounds like a trust score and is not one: measured against a known signal on
+    // real hardware it came out *higher* for noise (0.47) than for a correct detection (0.36).
+    // The spread of the recent run is what separated them, by a factor of thirty, and it is
+    // also the thing the server gates on — so it is what the number is judged by here.
+    const margin = latest.stability_tolerance > 0
+      ? latest.stability_sd / latest.stability_tolerance
+      : 0;
+    const quality = margin < 0.5 ? "good" : margin < 0.8 ? "warn" : "bad";
     bpmValue.style.color = `var(--${quality})`;
     confidence.className = `pill pill-${quality}`;
-    confidence.textContent = `${(latest.confidence * 100).toFixed(0)}% confidence`;
+    confidence.textContent = `±${latest.stability_sd.toFixed(1)} BPM`;
     detail.textContent =
-      `in-band SNR ${latest.snr_db.toFixed(1)} dB · ${latest.window_s.toFixed(0)}s window` +
-      ` · subcarriers ${latest.subcarriers.slice(0, 6).join(", ")}`;
+      `steady to ±${latest.stability_sd.toFixed(2)} of ±${latest.stability_tolerance.toFixed(2)} allowed` +
+      ` · ${latest.window_s.toFixed(0)}s window · peak share ${(latest.confidence * 100).toFixed(0)}%` +
+      ` · in-band SNR ${latest.snr_db.toFixed(1)} dB`;
   }
 
   function drawWaveform() {

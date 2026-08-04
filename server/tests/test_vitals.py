@@ -264,7 +264,7 @@ def _gate(**kwargs) -> VitalsEstimator:
 def test_gate_withholds_until_it_has_a_run():
     """One estimate is not evidence, however good it looks."""
     est = _gate(stability_window_s=90.0, stability_sd_bpm=1.5)
-    assert est._stable(0.0, 14.0) == (False, float("inf"))
+    assert est._stable(0.0, 14.0)[:2] == (False, float("inf"))
     assert est._stable(10.0, 14.0)[0] is False
 
 
@@ -272,7 +272,7 @@ def test_gate_publishes_a_steady_run():
     est = _gate(stability_window_s=90.0, stability_sd_bpm=1.5)
     ok = False
     for i in range(20):
-        ok, _spread = est._stable(i * 10.0, 14.0 + 0.1 * (i % 2))
+        ok, _spread, _tol = est._stable(i * 10.0, 14.0 + 0.1 * (i % 2))
     assert ok is True
 
 
@@ -282,7 +282,7 @@ def test_gate_refuses_a_wandering_run():
     wandering = [7.0, 22.0, 11.0, 19.0, 9.0, 23.0, 15.0, 8.0, 21.0, 12.0]
     ok = True
     for i, bpm in enumerate(wandering):
-        ok, spread = est._stable(i * 10.0, bpm)
+        ok, spread, _tol = est._stable(i * 10.0, bpm)
     assert ok is False
     assert spread > 1.5
 
@@ -292,13 +292,13 @@ def test_gate_needs_the_run_to_span_real_time():
     est = _gate(stability_window_s=90.0, stability_sd_bpm=1.5)
     ok = False
     for i in range(10):
-        ok, _ = est._stable(i * 0.001, 14.0)
+        ok, *_ = est._stable(i * 0.001, 14.0)
     assert ok is False
 
 
 def test_gate_can_be_disabled_for_offline_analysis():
     est = _gate(stability_window_s=0.0)
-    assert est._stable(0.0, 14.0) == (True, 0.0)
+    assert est._stable(0.0, 14.0)[:2] == (True, 0.0)
 
 
 def test_reset_forgets_the_run():
@@ -327,14 +327,14 @@ def test_gate_tolerance_scales_with_the_rate():
     # Around 60 BPM the tolerance is 3.0, so a 2 BPM spread is acceptable...
     ok = False
     for i in range(20):
-        ok, _ = est._stable(i * 10.0, 60.0 + (2.5 if i % 2 else -2.5))
+        ok, *_ = est._stable(i * 10.0, 60.0 + (2.5 if i % 2 else -2.5))
     assert ok is True
 
     # ...while the same absolute spread around 15 BPM is not, where the floor of 1.5 rules.
     est2 = _gate(stability_window_s=90.0, stability_sd_bpm=1.5, stability_sd_frac=0.05)
     ok2 = True
     for i in range(20):
-        ok2, _ = est2._stable(i * 10.0, 15.0 + (2.5 if i % 2 else -2.5))
+        ok2, *_ = est2._stable(i * 10.0, 15.0 + (2.5 if i % 2 else -2.5))
     assert ok2 is False
 
 
@@ -343,6 +343,6 @@ def test_gate_floor_applies_at_low_rates():
     est = _gate(stability_window_s=90.0, stability_sd_bpm=1.5, stability_sd_frac=0.05)
     ok = False
     for i in range(20):
-        ok, _ = est._stable(i * 10.0, 6.0 + (1.0 if i % 2 else -1.0))
+        ok, *_ = est._stable(i * 10.0, 6.0 + (1.0 if i % 2 else -1.0))
     # 5% of 6 BPM is 0.3; the 1.5 floor is what lets a real 6 BPM breath through.
     assert ok is True

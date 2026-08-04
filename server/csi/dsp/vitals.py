@@ -140,6 +140,12 @@ class VitalsConfig:
 class VitalsResult:
     bpm: float
     confidence: float  # 0..1, peak power as a fraction of in-band power
+    # Standard deviation of the recent run of estimates, in BPM, and the tolerance it had to
+    # meet. This is the number that tracks whether the answer is real: measured against a known
+    # signal on real hardware, `confidence` was *higher* for noise than for a correct detection,
+    # while the spread separated them by a factor of thirty. The UI leads with this one.
+    stability_sd: float
+    stability_tolerance: float
     snr_db: float  # in-band over out-of-band, on the combined spectrum
     band: tuple[float, float]
     window_s: float
@@ -155,6 +161,8 @@ class VitalsResult:
         return {
             "bpm": round(self.bpm, 2),
             "confidence": round(self.confidence, 3),
+            "stability_sd": round(self.stability_sd, 3),
+            "stability_tolerance": round(self.stability_tolerance, 3),
             "snr_db": round(self.snr_db, 1),
             "band": list(self.band),
             "window_s": self.window_s,
@@ -184,8 +192,11 @@ class VitalsEstimator:
         and letting it vote would either mask a real change or veto a good new signal."""
         self._recent.clear()
 
-    def _stable(self, t_s: float, bpm: float) -> tuple[bool, float]:
-        """Fold in this estimate and say whether the recent run agrees. Returns (ok, spread).
+    def _stable(self, t_s: float, bpm: float) -> tuple[bool, float, float]:
+        """Fold in this estimate and say whether the recent run agrees.
+
+        Returns (ok, spread, tolerance) — the last two so a caller can show how close to the
+        edge a published number was, rather than only whether it passed.
 
         `stability_window_s = 0` disables the gate and returns the raw per-window estimate.
         That is for testing the spectral estimator in isolation, and for offline analysis where
@@ -194,7 +205,7 @@ class VitalsEstimator:
         """
         cfg = self.config
         if cfg.stability_window_s <= 0:
-            return True, 0.0
+            return True, 0.0, 0.0
         self._recent.append((t_s, bpm))
         cutoff = t_s - cfg.stability_window_s
         while self._recent and self._recent[0][0] < cutoff:
@@ -205,12 +216,12 @@ class VitalsEstimator:
         # Not enough history to judge yet. Publishing here would reintroduce exactly the
         # single-window number this gate exists to suppress, so it stays quiet instead.
         if len(values) < 3 or span < 0.5 * cfg.stability_window_s:
-            return False, float("inf")
+            return False, float("inf"), 0.0
         sd = float(np.std(values))
         # Scaled to the rate being measured, floored by the absolute term so a very low rate
         # cannot make the gate arbitrarily strict.
         tolerance = max(cfg.stability_sd_bpm, cfg.stability_sd_frac * float(np.median(values)))
-        return sd <= tolerance, sd
+        return sd <= tolerance, sd, tolerance
 
     def estimate(self, history: History) -> VitalsResult | None:
         cfg = self.config
@@ -275,7 +286,7 @@ class VitalsEstimator:
         # The gate. A single window's peak is not evidence on this hardware: with no
         # respiration present at all, successive windows put the peak anywhere in the band, and
         # every one of them looks like a measurement on its own.
-        stable, spread = self._stable(window.t_us[-1] / 1e6, bpm)
+        stable, spread, tolerance = self._stable(window.t_us[-1] / 1e6, bpm)
         if not stable:
             self.last_rejection = (
                 f"unstable: {spread:.1f} BPM spread over the last "
@@ -296,6 +307,8 @@ class VitalsEstimator:
         return VitalsResult(
             bpm=bpm,
             confidence=confidence,
+            stability_sd=spread,
+            stability_tolerance=tolerance,
             snr_db=snr_db,
             band=cfg.band,
             window_s=cfg.window_s,
