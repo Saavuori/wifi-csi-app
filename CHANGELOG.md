@@ -16,6 +16,16 @@ Versions are `MAJOR.MINOR.PATCH`:
 The git tag is authoritative. `server/pyproject.toml` and `web/package.json` are updated to
 match, and the running server reports the same number on `/api/version` and in the header.
 
+## v0.3.1 — 2026-08-04
+
+fix: build the release image when the tag is cut, not when it is noticed (#35)
+
+### Changes
+- fix: build the release image when the tag is cut, not when it is noticed
+- docs: a CLAUDE.md that says which commit it was written against
+
+Release type: **patch** (v0.3.0 → v0.3.1)
+
 ## v0.3.0 — 2026-08-04
 
 feat: teach the room its zones, and say which one the movement is in (#32)
