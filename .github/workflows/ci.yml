@@ -4,9 +4,16 @@ name: ci
 # than run in sequence because they share nothing and a failure should say which layer broke
 # without waiting for the others.
 
+# Branches other than main are covered by their pull request, not by their pushes. Listing `**`
+# here ran everything twice for every PR branch — once for the push and once for the pull
+# request, which the concurrency group below cannot collapse because `github.ref` is
+# `refs/heads/x` for one and `refs/pull/N/merge` for the other. The push copy was also the one
+# that published, so every feature branch left a GHCR tag behind that nothing ever pulls, and
+# branches are not deleted on merge. A branch with no pull request open can still be checked by
+# hand with workflow_dispatch.
 on:
   push:
-    branches: ["**"]
+    branches: [main]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
@@ -85,7 +92,7 @@ jobs:
     uses: ./.github/workflows/image.yml
     with:
       # A pull request builds to prove the Containerfile still works, and publishes nothing.
-      # Everything else publishes under its own branch or version tag.
+      # What is left — main, a tag pushed by hand, a run someone asked for — is worth publishing.
       push: ${{ github.event_name != 'pull_request' }}
       # No `latest` here. It names the newest *release* — see release.yml — because `install.sh`
       # pulls it by default, and a fresh install landing on an unreviewed main build is how a Pi
