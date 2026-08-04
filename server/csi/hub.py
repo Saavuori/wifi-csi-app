@@ -33,6 +33,7 @@ from .config import Settings
 from .downlink import encode_frame
 from .dsp.preprocess import Preprocessor, Processed
 from .dsp.presence import PresenceDetector
+from .dsp.presence import State as PresenceState
 from .dsp.selection import (
     BREATHING_BAND,
     HEART_BAND,
@@ -42,6 +43,7 @@ from .dsp.selection import (
 )
 from .dsp.subcarriers import describe
 from .dsp.vitals import VitalsEstimator
+from .dsp.zones import Binding, ZoneClassifier
 from .nodecontrol import NodeControlStore
 from .nodes import NodeHealth
 from .protocol import Frame, ProtocolError, parse_frame
@@ -50,6 +52,7 @@ from .replay import Replayer
 from .ring import FrameRing, History, Window
 from .sessions import SessionStore
 from .version import build_info
+from .zonestore import ZoneStore, ZoneStoreFull
 
 log = logging.getLogger("csi.hub")
 
@@ -162,6 +165,7 @@ class NodeState:
         self.presence = PresenceDetector(settings.presence)
         self.breathing = VitalsEstimator(settings.breathing)
         self.heart = VitalsEstimator(settings.heart)
+        self.zone = ZoneClassifier(settings.zones)
         self.ring: FrameRing | None = None
         self.last_metrics: dict = {}
         # Transmitters this node has heard, keyed by source MAC. In monitor mode with no
@@ -232,6 +236,10 @@ class NodeState:
             # they would either mask a genuine change or veto a good signal for a window.
             self.breathing.reset()
             self.heart.reset()
+            # Same argument for the zone vote: it describes movement on a link that has gone,
+            # and left in place it would hold a stale zone on screen for several seconds after
+            # the room stopped being the one it names.
+            self.zone.reset()
             if self.ring is not None:
                 self.ring.clear()
 
@@ -250,6 +258,14 @@ class Hub:
         self.settings.ensure_dirs()
         self.sessions = SessionStore(self.settings.recordings_dir)
         self.control = NodeControlStore(self.settings.data_dir / "node-control.json")
+        # One `ZoneConfig` instance, shared by the store, every classifier and the config patch
+        # path — so moving a rejection slider re-derives every threshold without rebuilding
+        # anything. See `ZoneModel.thresholds`.
+        self.zones = ZoneStore(
+            self.settings.zones_dir,
+            self.settings.zones,
+            max_bytes=int(self.settings.zones_max_mb * 1024**2),
+        )
 
         self.nodes: dict[int, NodeState] = {}
         self.clients: set[Client] = set()
@@ -257,6 +273,12 @@ class Hub:
         self.recorder: Recorder | None = None
         self.replayer: Replayer | None = None
         self._replay_task: asyncio.Task | None = None
+
+        # One zone capture at a time. Recording an example is a physical act — someone walks
+        # into a room and moves about — so two at once is not a concurrency problem to solve,
+        # it is a request that cannot mean anything.
+        self._zone_capture: dict | None = None
+        self._zone_task: asyncio.Task | None = None
 
         self.started_at = time.time()
         self.bad_packets = 0
@@ -270,6 +292,10 @@ class Hub:
     # -- lifecycle ------------------------------------------------------------------------
 
     async def start(self) -> None:
+        # Zone models are built from the examples on disk rather than persisted, so that a
+        # change to the feature extractor takes effect on the next start instead of needing a
+        # migration. Off the event loop: it reads every stored example.
+        await asyncio.to_thread(self.zones.rebuild)
         self._metrics_task = asyncio.create_task(self._metrics_loop(), name="csi-metrics")
         if self.settings.record:
             self.start_recording("live")
@@ -281,6 +307,7 @@ class Hub:
         # that is supposed to be clean.
         self._stopping = True
         try:
+            await self.cancel_zone_capture()
             await self.stop_replay()
             if self._metrics_task:
                 self._metrics_task.cancel()
@@ -509,6 +536,171 @@ class Hub:
             for state in self.nodes.values():
                 state.reset()
 
+    # -- zone capture ---------------------------------------------------------------------
+
+    def zone_capture_state(self) -> dict | None:
+        return dict(self._zone_capture) if self._zone_capture is not None else None
+
+    def start_zone_capture(
+        self, zone_id: str, node_id: int, *, duration_s: float, countdown_s: float
+    ) -> dict:
+        """Arrange to take an example off the ring in `countdown_s + duration_s` seconds.
+
+        Nothing is diverted from the ingest path and no second recorder is started. The ring
+        already holds two minutes of history for every node, so recording an example is a timer
+        and then a snapshot — which means this cannot slow ingest down or drop a frame no matter
+        what it does, and there is exactly one code path producing the windows that both the
+        analysis and the fingerprints are computed from.
+
+        The countdown is the point of the whole arrangement: you press the button, walk to the
+        kitchen, and the capture starts when you are there.
+        """
+        if self._zone_capture is not None:
+            raise RuntimeError("a zone capture is already running")
+        zone = self.zones.get_zone(zone_id)
+        if zone is None:
+            raise KeyError(zone_id)
+        state = self.nodes.get(node_id)
+        if state is None or state.ring is None:
+            raise ValueError(f"node {node_id} has sent no frames yet")
+
+        self._zone_capture = {
+            "zone_id": zone_id,
+            "zone_name": zone.name,
+            "node_id": node_id,
+            "duration_s": duration_s,
+            "countdown_s": countdown_s,
+            "phase": "countdown",
+            "remaining_s": countdown_s,
+            "started_at": time.time(),
+            "link_epoch": state.health.link_epoch,
+        }
+        self._zone_task = asyncio.create_task(self._run_zone_capture(), name="csi-zone-capture")
+        self.broadcast({"type": "zone_capture", "capture": self.zone_capture_state()})
+        return self.zone_capture_state()  # type: ignore[return-value]
+
+    async def cancel_zone_capture(self) -> bool:
+        if self._zone_capture is None:
+            return False
+        if self._zone_task is not None:
+            self._zone_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._zone_task
+        return True
+
+    async def _run_zone_capture(self) -> None:
+        capture = self._zone_capture
+        assert capture is not None
+        tick = 0.25
+        motions: list[float] = []
+        enters: list[float] = []
+        try:
+            phases = (
+                ("countdown", capture["countdown_s"]),
+                ("recording", capture["duration_s"]),
+            )
+            for phase, length in phases:
+                capture["phase"] = phase
+                remaining = float(length)
+                while remaining > 0:
+                    capture["remaining_s"] = round(remaining, 2)
+                    self.broadcast({"type": "zone_capture", "capture": self.zone_capture_state()})
+                    await asyncio.sleep(min(tick, remaining))
+                    remaining -= tick
+                    if phase == "recording":
+                        # The metrics loop is already computing the motion index at 5 Hz, so how
+                        # much movement the example actually contains costs nothing to record.
+                        # Samples taken while the detector is calibrating are skipped: its
+                        # threshold is not settled yet, so a comparison against it means nothing.
+                        node = self.nodes.get(capture["node_id"])
+                        presence = (node.last_metrics.get("presence") if node else None) or {}
+                        if "motion" in presence and presence.get("state") != "calibrating":
+                            motions.append(float(presence["motion"]))
+                            enters.append(float(presence.get("enter", 0.0)))
+
+            capture["phase"] = "saving"
+            capture["remaining_s"] = 0.0
+            self.broadcast({"type": "zone_capture", "capture": self.zone_capture_state()})
+            result = await self._store_zone_capture(capture, motions, enters)
+        except asyncio.CancelledError:
+            result = {"ok": False, "error": "cancelled"}
+            raise
+        except Exception as exc:  # never leave the UI with a capture that never ends
+            log.exception("zone capture failed")
+            result = {"ok": False, "error": str(exc)}
+        finally:
+            self._zone_capture = None
+            self._zone_task = None
+            self.broadcast({"type": "zone_capture", "capture": None, "result": result})
+            self.broadcast({"type": "zones"})
+
+    async def _store_zone_capture(
+        self, capture: dict, motions: list[float], enters: list[float]
+    ) -> dict:
+        """Validate the window the capture just spanned, and keep it if it is worth keeping."""
+        node_id = int(capture["node_id"])
+        duration_s = float(capture["duration_s"])
+        state = self.nodes.get(node_id)
+        if state is None or state.ring is None:
+            return {"ok": False, "error": f"node {node_id} stopped sending during the capture"}
+        if state.health.link_epoch != capture["link_epoch"]:
+            # Half of this example is one link and half is another. Averaged into a centroid it
+            # would be a fingerprint of a room that does not exist.
+            return {
+                "ok": False,
+                "error": "the node re-associated during the capture; nothing was saved",
+            }
+
+        window = state.ring.seconds(duration_s)
+        if len(window) < 16 or window.duration_s < 0.8 * duration_s:
+            return {
+                "ok": False,
+                "error": (
+                    f"only {window.duration_s:.1f}s of the {duration_s:.0f}s asked for arrived — "
+                    "the link was too busy, or the history was cleared mid-capture"
+                ),
+            }
+
+        # Both numbers, and no verdict — `ZoneSample.quiet` derives that from them. An example
+        # recorded while nobody moved is a fingerprint of an empty room wearing a zone's name and
+        # will drag that zone's centroid toward the noise, but it is stored and flagged rather
+        # than refused: the person who recorded it is the one who knows whether they were moving,
+        # and deleting it is the remedy the whole feature is built around.
+        #
+        # Zero when there were no usable presence samples, which reads as "not measured" rather
+        # than as a threshold of nothing that every example would fall below. A warning that
+        # fires on everything trains people to ignore it.
+        motion_median = float(np.median(motions)) if motions else 0.0
+        enter = float(np.median(enters)) if enters else 0.0
+
+        try:
+            sample = await asyncio.to_thread(
+                self.zones.add_sample,
+                capture["zone_id"],
+                window,
+                node_id=node_id,
+                src_mac=state.health.src_mac.hex(":") if any(state.health.src_mac) else "",
+                channel=state.health.channel,
+                motion_median=motion_median,
+                motion_enter=enter,
+            )
+        except ZoneStoreFull as exc:
+            return {"ok": False, "error": str(exc)}
+        except KeyError:
+            return {"ok": False, "error": "that zone was deleted while the capture was running"}
+
+        log.info(
+            "zone example %s recorded for %s: %.1fs, %d frames, motion %.2f%s",
+            sample.id, capture["zone_id"], window.duration_s, len(window), motion_median,
+            " (quiet)" if sample.quiet else "",
+        )
+        return {"ok": True, "sample": sample.as_dict()}
+
+    async def rebuild_zones(self) -> None:
+        """Recompute the zone models off the event loop. Call after any edit."""
+        await asyncio.to_thread(self.zones.rebuild)
+        self.broadcast({"type": "zones"})
+
     # -- analysis -------------------------------------------------------------------------
 
     async def _metrics_loop(self) -> None:
@@ -607,6 +799,22 @@ class Hub:
         history = ring.seconds(span_s)
         return history if len(history) >= 16 else None
 
+    @staticmethod
+    def _binding_for(state: NodeState, history: Window) -> Binding:
+        """The link this node's frames are currently arriving over.
+
+        `src_mac` is read from the health record rather than from the window because the window
+        carries amplitudes, not addresses. It is a single attribute load of an immutable
+        `bytes`, which is safe to do from the worker thread for the same reason the rest of
+        `compute_metrics` is: the ingest task only ever rebinds it, never mutates it in place.
+        """
+        return Binding.make(
+            node_id=state.node_id,
+            n_sub=history.n_sub,
+            mask=history.mask,
+            src_mac=state.health.src_mac.hex(":") if any(state.health.src_mac) else "",
+        )
+
     def compute_metrics(self, state: NodeState, history: History) -> dict | None:
         """Runs in a worker thread over a snapshot from `history_for`, never `state.ring`."""
         if len(history) < 16:
@@ -617,6 +825,25 @@ class Hub:
         presence = state.presence.update(history)
         if presence is not None:
             out["presence"] = presence.as_dict()
+
+        # Zone classification is gated on the presence detector, not merged into it. A still
+        # room's motion-band profile is thermal noise, and thermal noise is exactly as
+        # unit-length as any other feature vector — the nearest centroid to it is always some
+        # definite zone. Reading `motion` against the enter threshold rather than waiting for
+        # `state is PRESENT` keeps the readout responsive: presence debounces for a second and a
+        # half before it admits anyone is there, and the zone answer should not inherit that.
+        moving = (
+            presence is not None
+            and presence.state is not PresenceState.CALIBRATING
+            and presence.motion >= presence.threshold_enter
+        )
+        binding = self._binding_for(state, history)
+        out["zone"] = state.zone.update(
+            history,
+            self.zones.model_for(state.node_id, binding),
+            moving=moving,
+            binding=binding,
+        )
 
         breathing = state.breathing.estimate(history)
         if breathing is not None:
@@ -694,6 +921,7 @@ class Hub:
             ),
             "recording": self.recorder.session.as_dict() if self.recorder else None,
             "replay": self.replayer.state() if self.replayer else None,
+            "zone_capture": self.zone_capture_state(),
             "counters": {
                 "live_frames": self.live_frames,
                 "replay_frames": self.replay_frames,
@@ -736,6 +964,15 @@ class Hub:
                 "band": list(s.heart.band),
                 "n_subcarriers": s.heart.n_subcarriers,
                 "gate_quantile": s.heart.selection.gate_quantile,
+            },
+            "zones": {
+                "window_s": s.zones.window_s,
+                "sample_s": s.zones.sample_s,
+                "band": list(s.zones.band),
+                "vote_s": s.zones.vote_s,
+                "reject_sigma": s.zones.reject_sigma,
+                "reject_separation_frac": s.zones.reject_separation_frac,
+                "margin_frac": s.zones.margin_frac,
             },
         }
 
@@ -803,6 +1040,23 @@ class Hub:
             gate = _number(patch_cfg.get("gate_quantile"), 0.0, 0.95)
             if gate is not None:
                 cfg.selection.gate_quantile = gate
+
+        # Only the tunables that can be honoured without re-reading every stored example. The
+        # analysis window and the band are deliberately not among them: changing either would
+        # make live features incomparable with fingerprints extracted under the old value, and
+        # the failure would be silent — every zone would simply stop matching. Those belong to
+        # the feature version, which is a code change and a rebuild.
+        zones = _section(patch, "zones")
+        for key, lo, hi in (
+            ("vote_s", 0.0, 60.0),
+            ("reject_sigma", 0.0, 20.0),
+            ("reject_separation_frac", 0.0, 2.0),
+            ("margin_frac", 0.0, 1.0),
+            ("sample_s", 2.0, 300.0),
+        ):
+            value = _number(zones.get(key), lo, hi) if key in zones else None
+            if value is not None:
+                setattr(s.zones, key, value)
 
         config = self.config_dict()
         self.broadcast({"type": "config", "config": config})

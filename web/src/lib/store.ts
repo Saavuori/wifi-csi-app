@@ -17,6 +17,9 @@ import type {
   WifiNode,
   WorkerIn,
   WorkerOut,
+  ZoneCapture,
+  ZoneCaptureResult,
+  ZoneReport,
 } from "./messages";
 
 type Listener<T> = (value: T) => void;
@@ -48,6 +51,11 @@ export class Store {
   readonly replay = new Signal<ReplayState | null>(null);
   readonly sessions = new Signal<Session[]>([]);
   readonly wifi = new Signal<WifiNode[]>([]);
+  readonly zones = new Signal<ZoneReport | null>(null);
+  readonly zoneCapture = new Signal<ZoneCapture | null>(null);
+  /** The outcome of the last capture, so a refusal can be shown rather than looking like a
+   *  button that did nothing. Cleared when the next capture starts. */
+  readonly zoneResult = new Signal<ZoneCaptureResult | null>(null);
   readonly rate = new Signal(0);
   readonly build = new Signal<BuildInfo | null>(null);
 
@@ -123,6 +131,73 @@ export class Store {
     await this.refreshWifi();
   }
 
+  /** Zone definitions, their examples, and how well they separate. */
+  async refreshZones() {
+    try {
+      const response = await fetch("/api/zones");
+      const body = (await response.json()) as ZoneReport;
+      this.zones.set(body);
+      this.zoneCapture.set(body.capture);
+    } catch {
+      // Offline. The WebSocket reconnect triggers another refresh.
+    }
+  }
+
+  /**
+   * Start recording an example. The server counts down, then takes the window off the ring.
+   *
+   * Returns the server's refusal text rather than throwing, because every reason this can fail
+   * is one the person standing in the kitchen needs to read: no frames from that node, a
+   * capture already running, or the examples directory at its budget.
+   */
+  async recordZoneSample(
+    zoneId: string,
+    nodeId: number,
+    options: { duration_s: number; countdown_s: number },
+  ): Promise<string | null> {
+    this.zoneResult.set(null);
+    const response = await fetch(`/api/zones/${zoneId}/samples`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ node_id: nodeId, ...options }),
+    });
+    if (response.ok) return null;
+    const body = (await response.json().catch(() => ({}))) as { detail?: string };
+    return body.detail ?? `could not start recording (${response.status})`;
+  }
+
+  async cancelZoneCapture() {
+    await fetch("/api/zones/capture/cancel", { method: "POST" });
+  }
+
+  async createZone(name: string) {
+    await fetch("/api/zones", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    await this.refreshZones();
+  }
+
+  async renameZone(zoneId: string, name: string) {
+    await fetch(`/api/zones/${zoneId}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    await this.refreshZones();
+  }
+
+  async deleteZone(zoneId: string) {
+    await fetch(`/api/zones/${zoneId}`, { method: "DELETE" });
+    await this.refreshZones();
+  }
+
+  async deleteZoneSample(zoneId: string, sampleId: string) {
+    await fetch(`/api/zones/${zoneId}/samples/${sampleId}`, { method: "DELETE" });
+    await this.refreshZones();
+  }
+
   private send(message: WorkerIn) {
     this.worker.postMessage(message);
   }
@@ -178,6 +253,16 @@ export class Store {
         // desired/applied/pending picture and the scan results stay current without a poll.
         void this.refreshWifi();
         break;
+      case "zones":
+        void this.refreshZones();
+        break;
+      case "zone_capture":
+        this.zoneCapture.set(event.capture);
+        // The result only arrives on the broadcast that ends a capture. Keeping the previous
+        // one would leave a stale "saved" or a stale error on screen through the next attempt.
+        if (event.result !== undefined) this.zoneResult.set(event.result);
+        else if (event.capture !== null) this.zoneResult.set(null);
+        break;
       default:
         break;
     }
@@ -189,7 +274,9 @@ export class Store {
     this.config.set(snapshot.config);
     this.recording.set(snapshot.recording);
     this.replay.set(snapshot.replay);
+    this.zoneCapture.set(snapshot.zone_capture ?? null);
     void this.refreshSessions();
+    void this.refreshZones();
   }
 
   private setNodes(nodes: NodeHealth[]) {

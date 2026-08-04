@@ -11,6 +11,7 @@ apps, which is what this server runs.
 | `CSI_MAX_DISK_GB` | 8 | Cap on the recordings directory. A node writes roughly a gigabyte a day and the default home for it is the SD card the OS is also on, so the oldest recordings are deleted to stay under this. `0` disables pruning, which means the appliance eventually fills the card it boots from. |
 | `CSI_DROP_DC_ADJACENT` | false | Set to `true` for a Raspberry Pi node. The BCM43455 leaks its DC offset into the subcarriers either side of centre, measured at around eight times the median amplitude, and subcarrier selection ranks by variance — so the bin carrying no signal is a candidate to be chosen. An ESP32 does not have this and should leave it off. |
 | `CSI_RECORD` | true | Recording everything costs disk; losing a session you cannot repeat costs more. |
+| `CSI_ZONES_MAX_MB` | 200 | Cap on `/data/zones`, the examples the Zones view is taught from. Deliberately separate from `CSI_MAX_DISK_GB` and deliberately not pruned: a recording is rolling capture that retention is right to delete, and an example someone walked into the kitchen to record is training data. Reaching this refuses the next example instead. |
 
 ## Raspberry Pi
 
@@ -139,6 +140,11 @@ podman exec csi ls -la /data/recordings
 Sessions are deletable from the Sessions view, which removes the recording and its index
 together. `sessions.json` is a plain file — safe to edit by hand when you mislabel a session at
 one in the morning, which is the reason it is a file and not a database.
+
+`/data/zones` is the other half and is not covered by any of the above. It holds the examples the
+Zones view was taught from — one `.npz` per example plus a feature cache, and `zones.json` naming
+them — under `CSI_ZONES_MAX_MB` and never pruned. Deleting a zone or an example from the view is
+what removes them; nothing does it on your behalf.
 
 ## Health
 

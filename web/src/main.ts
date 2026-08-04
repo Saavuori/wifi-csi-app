@@ -12,11 +12,13 @@ import { subcarrierView } from "./views/subcarriers";
 import type { View } from "./views/view";
 import { waterfallView } from "./views/waterfall";
 import { wifiView } from "./views/wifi";
+import { zonesView } from "./views/zones";
 
 const views: View[] = [
   waterfallView(),
   subcarrierView(),
   motionView(),
+  zonesView(),
   vitalsView("breathing"),
   vitalsView("heart"),
   placementView(),
@@ -28,10 +30,10 @@ const views: View[] = [
 /**
  * The phone's five destinations.
  *
- * All eight views stay reachable and keep their own routes — the desktop sidebar still lists
- * every one. This is only about what a thumb can reach without a menu. The previous bar held all
- * eight and scrolled horizontally, which meant three of them sat off-screen; the selected tab had
- * to be scrolled into view programmatically just to prove that a tap had done anything.
+ * Every view stays reachable and keeps its own route — the desktop sidebar still lists all ten.
+ * This is only about what a thumb can reach without a menu. The previous bar held all of them and
+ * scrolled horizontally, which meant several sat off-screen; the selected tab had to be scrolled
+ * into view programmatically just to prove that a tap had done anything.
  *
  * `covers` is what makes five tabs enough: a tab stays lit for any view it stands in for, so
  * Vitals reads as selected on both bands and More reads as selected on everything behind it.
@@ -52,12 +54,13 @@ const TABS: Tab[] = [
     label: "More",
     glyph: ICONS.more,
     route: null,
-    covers: ["subcarriers", "sessions", "health", "wifi"],
+    covers: ["subcarriers", "zones", "sessions", "health", "wifi"],
   },
 ];
 
 const MORE: { id: string; blurb: string }[] = [
   { id: "subcarriers", blurb: "A handful of traces, close up — the shape of a single breath" },
+  { id: "zones", blurb: "Teach the room its places, then see which one the movement is in" },
   { id: "sessions", blurb: "Record the room, replay it through the same pipeline" },
   { id: "health", blurb: "Rate, jitter, loss and roaming, per node" },
   { id: "wifi", blurb: "Channel and traffic per node; scan the air to pick an access point" },

@@ -9,6 +9,7 @@ from pathlib import Path
 from .dsp.preprocess import PreprocessConfig
 from .dsp.presence import PresenceConfig
 from .dsp.vitals import VitalsConfig
+from .dsp.zones import ZoneConfig
 
 
 def _env(name: str, default: str) -> str:
@@ -81,6 +82,13 @@ class Settings:
     # A node that says nothing for this long is reported offline.
     node_timeout_s: float = field(default_factory=lambda: _env_float("CSI_NODE_TIMEOUT_S", 5.0))
 
+    # Cap on the zone examples directory. Separate from `max_disk_gb` and expressed in megabytes
+    # because it is a different kind of thing: recordings are rolling capture that retention is
+    # right to delete, while an example someone walked into the kitchen to record is training
+    # data. Reaching this budget refuses the next recording rather than quietly deleting an
+    # older one. A 20 s example is roughly 0.4 MB at 64 subcarriers and 1.6 MB at 256.
+    zones_max_mb: float = field(default_factory=lambda: _env_float("CSI_ZONES_MAX_MB", 200.0))
+
     preprocess: PreprocessConfig = field(
         default_factory=lambda: PreprocessConfig(
             # Settable from the environment because it is a property of the *hardware* a node
@@ -93,6 +101,7 @@ class Settings:
     presence: PresenceConfig = field(default_factory=PresenceConfig)
     breathing: VitalsConfig = field(default_factory=VitalsConfig.breathing)
     heart: VitalsConfig = field(default_factory=VitalsConfig.heart)
+    zones: ZoneConfig = field(default_factory=ZoneConfig)
 
     def __post_init__(self) -> None:
         self.data_dir = self.data_dir.resolve()
@@ -103,8 +112,13 @@ class Settings:
     def recordings_dir(self) -> Path:
         return self.data_dir / "recordings"
 
+    @property
+    def zones_dir(self) -> Path:
+        return self.data_dir / "zones"
+
     def ensure_dirs(self) -> None:
         self.recordings_dir.mkdir(parents=True, exist_ok=True)
+        self.zones_dir.mkdir(parents=True, exist_ok=True)
 
     def ring_capacity(self) -> int:
         # Sized from the configured rate with generous headroom, because a node running fast is
