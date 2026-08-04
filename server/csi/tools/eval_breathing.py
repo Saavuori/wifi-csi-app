@@ -40,16 +40,32 @@ def load(path: Path, limit: int) -> list:
     return frames
 
 
-def estimate(frames: list, bpm: float, amplitude: float, settings: Settings) -> dict | None:
-    """Inject `bpm` into a copy of `frames`, run the real pipeline, return its metrics."""
+# How often to ask the hub for metrics, in frames. The live server polls on a timer; the gate
+# publishes only once a run of estimates spanning `stability_window_s` agrees, so a harness that
+# computes metrics once at the end sees a single estimate and is told "settling" forever.
+_POLL_EVERY = 200
+
+
+def run_once(
+    frames: list, bpm: float, amplitude: float, settings: Settings
+) -> tuple[list[float], int, str | None]:
+    """Inject `bpm` and replay through the real pipeline, polling as the server does.
+
+    Returns (published estimates, polls, last rejection). Polling rather than computing once at
+    the end is not a detail: the stability gate deliberately refuses to answer from a single
+    window, so a one-shot harness measures nothing but its own impatience.
+    """
     hub = Hub(settings)
     freqs = frequencies(frames[0].n_sub, 2.437e9)
     t0 = frames[0].timestamp
+    published: list[float] = []
+    polls = 0
+    rejection: str | None = None
 
-    for frame in frames:
+    for i, frame in enumerate(frames):
         csi = frame.complex()
         rms = float(np.sqrt(np.mean(np.abs(csi) ** 2)))
-        if rms > 0:
+        if rms > 0 and amplitude > 0:
             csi = csi + amplitude * rms * chest_path(
                 freqs, (frame.timestamp - t0) / 1e6, bpm=bpm, chest_mm=5.0, distance_m=5.2
             )
@@ -59,13 +75,23 @@ def estimate(frames: list, bpm: float, amplitude: float, settings: Settings) -> 
         clone.data = quantize_int8(csi)
         hub.handle_datagram(encode_frame(clone), clone.timestamp / 1e6)
 
-    state = next(iter(hub.nodes.values()), None)
-    if state is None:
-        return None
-    history = hub.history_for(state)
-    if history is None:
-        return None
-    return hub.compute_metrics(state, history)
+        if i % _POLL_EVERY != _POLL_EVERY - 1:
+            continue
+        state = next(iter(hub.nodes.values()), None)
+        if state is None:
+            continue
+        history = hub.history_for(state)
+        if history is None:
+            continue
+        polls += 1
+        metrics = hub.compute_metrics(state, history) or {}
+        breathing = metrics.get("breathing")
+        if breathing and breathing.get("bpm"):
+            published.append(float(breathing["bpm"]))
+        else:
+            rejection = metrics.get("breathing_rejected") or rejection
+
+    return published, polls, rejection
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -73,8 +99,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("recording", type=Path)
     parser.add_argument("--rates", type=float, nargs="+", default=list(DEFAULT_RATES))
     parser.add_argument("--amplitudes", type=float, nargs="+", default=[0.18])
-    parser.add_argument("--frames", type=int, default=6000,
-                        help="frames to use; must comfortably exceed the analysis window")
+    parser.add_argument("--frames", type=int, default=16000,
+                        help="frames to use. Must cover the analysis window plus the stability "
+                             "gate's agreement period with room to spare — at 40 Hz that is "
+                             "150 s before a single estimate can be published, so a short run "
+                             "reports 'settling' and looks like a fault (default 16000, ~7 min)")
     args = parser.parse_args(argv)
 
     frames = load(args.recording, args.frames)
@@ -90,28 +119,32 @@ def main(argv: list[str] | None = None) -> int:
 
     overall: list[float] = []
     for amplitude in args.amplitudes:
-        print(f"chest amplitude {amplitude} of frame RMS")
-        print(f"  {'true':>6}  {'est':>7}  {'error':>7}  {'conf':>5}  {'snr':>6}  note")
+        print(f"chest amplitude {amplitude} of frame RMS"
+              + ("   (no signal: anything reported here is a false positive)"
+                 if amplitude == 0 else ""))
+        print(f"  {'true':>6}  {'mean est':>9}  {'error':>7}  {'sd':>5}  {'shown':>6}  note")
         errors: list[float] = []
         for bpm in args.rates:
-            metrics = estimate(frames, bpm, amplitude, settings)
-            breathing = (metrics or {}).get("breathing")
-            rejected = (metrics or {}).get("breathing_rejected")
-            if breathing is None or not breathing.get("bpm"):
-                print(f"  {bpm:6.1f}  {'-':>7}  {'-':>7}  {'-':>5}  {'-':>6}  "
-                      f"{rejected or 'no estimate'}")
+            published, polls, rejection = run_once(frames, bpm, amplitude, settings)
+            shown = f"{100 * len(published) / max(polls, 1):.0f}%"
+            if not published:
+                print(f"  {bpm:6.1f}  {'-':>9}  {'-':>7}  {'-':>5}  {shown:>6}  "
+                      f"{rejection or 'withheld'}")
                 continue
-            est = float(breathing["bpm"])
-            err = est - bpm
-            errors.append(abs(err))
-            print(f"  {bpm:6.1f}  {est:7.2f}  {err:+7.2f}  "
-                  f"{breathing['confidence']:5.2f}  {breathing['snr_db']:6.1f}  ")
+            mean = float(np.mean(published))
+            err = mean - bpm
+            # Averaged over the run rather than taken from the last poll: one poll is one
+            # window, and the whole point of the gate is that a single window is not evidence.
+            if amplitude > 0:
+                errors.append(abs(err))
+            print(f"  {bpm:6.1f}  {mean:9.2f}  {err:+7.2f}  {np.std(published):5.2f}  "
+                  f"{shown:>6}  ")
         if errors:
             mae = sum(errors) / len(errors)
             overall.extend(errors)
             print(f"  MAE {mae:.2f} breaths/min over {len(errors)}/{len(args.rates)} rates\n")
         else:
-            print("  no estimates produced\n")
+            print()
 
     if overall:
         mae = sum(overall) / len(overall)
