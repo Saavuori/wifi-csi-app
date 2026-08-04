@@ -16,6 +16,15 @@ Versions are `MAJOR.MINOR.PATCH`:
 The git tag is authoritative. `server/pyproject.toml` and `web/package.json` are updated to
 match, and the running server reports the same number on `/api/version` and in the header.
 
+## v0.3.2 — 2026-08-04
+
+fix: stop the build cache from failing the release image (#37)
+
+### Changes
+- fix: stop the build cache from failing the release image
+
+Release type: **patch** (v0.3.1 → v0.3.2)
+
 ## v0.3.1 — 2026-08-04
 
 fix: build the release image when the tag is cut, not when it is noticed (#35)
