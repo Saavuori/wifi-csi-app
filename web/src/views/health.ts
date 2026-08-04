@@ -35,9 +35,13 @@ export function healthView(): View {
         el(
           "p",
           { class: "hint" },
-          "No nodes have sent anything yet. Check the server's UDP port and the node's " +
-            "CSI_SERVER_HOST, or run the synthetic node: " +
-            "python -m csi.tools.synth_node --nodes 2",
+          // Deliberately no "run the synthetic node" suggestion. That tool was removed when
+          // every runtime path that could emit fabricated frames was taken out, and pointing
+          // at a command that does not exist is worse than offering nothing. On a Pi the
+          // answer is almost always the node service rather than the server.
+          "No nodes have sent anything yet. On a Raspberry Pi, check the node is running: " +
+            "systemctl status csi-node, then journalctl -u csi-node -n 40. Otherwise check " +
+            "the server's UDP port and the node's CSI_SERVER_HOST.",
         ),
       );
       return;

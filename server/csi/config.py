@@ -75,7 +75,15 @@ class Settings:
     # A node that says nothing for this long is reported offline.
     node_timeout_s: float = field(default_factory=lambda: _env_float("CSI_NODE_TIMEOUT_S", 5.0))
 
-    preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
+    preprocess: PreprocessConfig = field(
+        default_factory=lambda: PreprocessConfig(
+            # Settable from the environment because it is a property of the *hardware* a node
+            # uses, not a preference: the BCM43455 leaks DC into k = +/-1 and an ESP32 does
+            # not. Left UI-only it was lost on every container restart, which meant the fix
+            # had to be reapplied by hand after each deploy and silently was not.
+            drop_dc_adjacent=_env_bool("CSI_DROP_DC_ADJACENT", False),
+        )
+    )
     presence: PresenceConfig = field(default_factory=PresenceConfig)
     breathing: VitalsConfig = field(default_factory=VitalsConfig.breathing)
     heart: VitalsConfig = field(default_factory=VitalsConfig.heart)

@@ -1081,3 +1081,25 @@ def test_watchdog_waits_a_cooldown_before_its_first_verdict():
     w = CaptureWatchdog(stall_s=10.0, cooldown_s=120.0)
     assert w.should_rearm(0.0) is False
     assert w.should_rearm(60.0) is False
+
+
+def test_node_and_server_agree_on_which_subcarriers_carry_data():
+    """The node keeps its own copy of the active ranges, because it runs on a Pi with no
+    server package installed. Two copies of a table is two chances to be wrong, and the way
+    this one goes wrong is quiet: the node would scale frames against a set of bins the server
+    then masks differently, and nothing would report a mismatch.
+
+    Compared against the server's own layout rather than against a second hardcoded list, so
+    editing LAYOUTS is what fails this — which is the point.
+    """
+    from csi.dsp.subcarriers import valid_mask
+
+    for n_sub in (64, 128, 256):
+        node_mask = csi_node.data_bins(n_sub)
+        # The server additionally drops pilots; the node deliberately does not, because a pilot
+        # still carries transmitted power and belongs in a scale estimate.
+        server_mask = valid_mask(n_sub, drop_pilots=False)
+        np.testing.assert_array_equal(
+            node_mask, server_mask,
+            err_msg=f"node and server disagree about the data bins at n_sub={n_sub}",
+        )
