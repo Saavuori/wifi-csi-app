@@ -4,8 +4,8 @@ name: release
 #
 # The version lives in git tags. `server/pyproject.toml` and `web/package.json` are updated to
 # match so an installed package reports the same number, but the tag is what is authoritative —
-# it is the thing the image build reads (ci.yml already tags `type=semver` from it) and the only
-# record that survives someone editing a file by hand.
+# it is what the image is built from and the only record that survives someone editing a file
+# by hand.
 #
 # Triggered on the merge rather than on the tag, because the PR is where the release type is
 # written down and a tag carries no such information.
@@ -35,6 +35,11 @@ jobs:
     name: version and tag
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
     runs-on: ubuntu-latest
+
+    outputs:
+      skip: ${{ steps.next.outputs.skip }}
+      tag: ${{ steps.next.outputs.tag }}
+      version: ${{ steps.next.outputs.version }}
 
     steps:
       - uses: actions/checkout@v4
@@ -116,7 +121,9 @@ jobs:
           git add server/pyproject.toml web/package.json CHANGELOG.md
           git commit -m "Release ${TAG}" -m "[skip ci]"
           git tag -a "${TAG}" -m "Release ${TAG}"
-          # The tag push is what triggers ci.yml to build and publish the versioned image.
+          # This push triggers nothing — a push made with GITHUB_TOKEN never starts a workflow
+          # run. That is why the image is built by the job below rather than by ci.yml noticing
+          # the tag.
           git push origin HEAD:main
           git push origin "${TAG}"
 
@@ -137,3 +144,33 @@ jobs:
           set -euo pipefail
           NOTES=$(python .github/scripts/apply_version.py --notes-only)
           gh release create "$TAG" --title "$TAG" --notes "$NOTES"
+
+  # Built from the tag, in the same run that created it. A release that cannot produce an image
+  # now fails here, visibly, instead of being discovered later by someone whose `docker pull`
+  # returns "manifest unknown".
+  #
+  # This is also the only place `latest` moves. It means "newest release", which is what
+  # `install.sh` pulls when nobody says otherwise, and the reason it is set here rather than in
+  # ci.yml is that a release is the only build anyone has actually decided to ship.
+  image:
+    name: image
+    needs: release
+    if: needs.release.outputs.skip == 'false'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/image.yml
+    with:
+      ref: ${{ needs.release.outputs.tag }}
+      version: ${{ needs.release.outputs.version }}
+      push: true
+      # Given explicitly rather than read from the ref: this workflow runs on the merged pull
+      # request, so `github.ref` here is the merge ref and metadata-action would derive `pr-N`.
+      #
+      # `latest` is unconditional because the version above is always a bump of the highest
+      # existing tag — there is no path through this workflow that releases a fix to an older
+      # line, so there is none that drags `latest` backwards.
+      tags: |
+        type=semver,pattern={{version}},value=${{ needs.release.outputs.version }}
+        type=semver,pattern={{major}}.{{minor}},value=${{ needs.release.outputs.version }}
+        type=raw,value=latest

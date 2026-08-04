@@ -1,0 +1,122 @@
+name: image
+
+# The container image build, in one place, called by both ci.yml and release.yml.
+#
+# It lives here rather than inline in ci.yml because a release cannot rely on *triggering* ci.yml.
+# release.yml pushes its tag with GITHUB_TOKEN, and GitHub deliberately does not start workflow
+# runs from pushes made with that token — so `on: push: tags: ["v*"]` never fired, and every
+# release from v0.1.0 to v0.3.0 was published with no image behind it. `docker pull ...:0.3.0`
+# failed with "manifest unknown" for a release that had been out for hours. Calling the build
+# directly removes the trigger from the equation: release.yml no longer asks GitHub to notice
+# something, it just runs the build.
+#
+# Keeping one copy matters more than the duplication it saves. Two builds drifting apart means
+# the image a release ships is not the image CI proved, which is the kind of difference that only
+# shows up on someone's Pi.
+
+on:
+  workflow_call:
+    inputs:
+      tags:
+        description: "docker/metadata-action tag rules, one per line"
+        required: true
+        type: string
+      ref:
+        description: "What to build; empty means whatever the caller is running against"
+        required: false
+        type: string
+        default: ""
+      version:
+        description: "Version to bake in; empty means derive it from the ref"
+        required: false
+        type: string
+        default: ""
+      push:
+        description: "Publish to GHCR, or build only to prove the Containerfile still works"
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  image:
+    name: amd64 + arm64
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Empty is checkout's own default — the caller's ref. A release passes its tag, so the
+          # release image is built from the tag rather than from whatever the caller happened to
+          # be sitting on (for release.yml that is the pull request merge ref, not the release
+          # commit).
+          ref: ${{ inputs.ref }}
+
+      # arm64 is emulated here. Only the pip install runs under it — the front end stage is
+      # pinned to the build platform in the Containerfile — and numpy/scipy resolve to
+      # prebuilt aarch64 wheels, so nothing in the emulated half actually compiles.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        # Keyed off the input rather than the event: inside a called workflow `github.event_name`
+        # is the *caller's* event, which says nothing about whether this particular build
+        # publishes.
+        if: inputs.push
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: ${{ inputs.tags }}
+
+      # What the running server reports on /api/version and shows in the header. A release passes
+      # its version in; anything else is labelled with the branch and short SHA, so an image
+      # someone pulled off a feature branch never claims to be a release.
+      #
+      # The commit is read back out of the checkout instead of from `github.sha`, which in a
+      # called workflow is the caller's SHA — for a release that is the merge ref, and the image
+      # would report a commit it was not built from.
+      - id: build-info
+        env:
+          VERSION_IN: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${VERSION_IN}" ]]; then
+            version="${VERSION_IN}"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            version="${GITHUB_REF#refs/tags/v}"
+          else
+            version="0.0.0-${GITHUB_REF_NAME//\//-}.${GITHUB_SHA::7}"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Containerfile
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            CSI_VERSION=${{ steps.build-info.outputs.version }}
+            CSI_COMMIT=${{ steps.build-info.outputs.commit }}
+            CSI_BUILT_AT=${{ steps.build-info.outputs.built_at }}
+          push: ${{ inputs.push }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Without this the package listing grows an "unknown/unknown" entry per platform,
+          # which makes it look like the multi-arch manifest is broken when it is not.
+          provenance: false
