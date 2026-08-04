@@ -238,3 +238,29 @@ def test_total_bytes_reads_the_disk_not_the_metadata(tmp_path):
     session.bytes = 0  # metadata deliberately stale
     store.update(session)
     assert store.total_bytes() == 2048
+
+
+def test_hub_prunes_but_keeps_the_active_recording(tmp_path):
+    """The hub's own wiring, not just the store's: budget applied, active session spared."""
+    from csi.config import Settings
+    from csi.hub import Hub
+
+    settings = Settings()
+    settings.data_dir = tmp_path
+    settings.web_dir = None
+    settings.record = False
+    settings.max_disk_gb = 8000 / 1024**3  # 8000 bytes, expressed in GB
+    settings.ensure_dirs()
+
+    hub = Hub(settings)
+    old = _write_session(hub.sessions, "old", 5000)
+    old.started_at = 100.0
+    hub.sessions.update(old)
+    hub.start_recording("live")
+    active = hub.recorder.session
+    hub.sessions.file_for(active).write_bytes(b"\0" * 5000)
+
+    hub._prune_recordings()
+
+    assert hub.sessions.get(active.id) is not None, "the session being written must survive"
+    assert hub.sessions.get(old.id) is None, "the oldest must go"

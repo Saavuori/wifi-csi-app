@@ -237,6 +237,7 @@ export type ServerEvent =
   | { type: "replay"; replay: ReplayState | null; session_id?: string }
   | { type: "config"; config: ServerConfig }
   | { type: "node_control"; control: NodeControl }
+  | { type: "sessions_pruned"; session_ids: string[] }
   | { type: "recalibrated"; node_id: number | null }
   | { type: "pong"; t: number };
 

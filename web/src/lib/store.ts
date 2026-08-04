@@ -168,6 +168,11 @@ export class Store {
       case "config":
         this.config.set(event.config);
         break;
+      case "sessions_pruned":
+        // Retention deleted the oldest recordings. Without this the sessions list keeps
+        // offering files that are gone, and replaying one 404s with no explanation.
+        void this.refreshSessions();
+        break;
       case "node_control":
         // A control change (from this browser or another) landed. Re-pull the overview so the
         // desired/applied/pending picture and the scan results stay current without a poll.
