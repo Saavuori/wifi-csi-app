@@ -30,10 +30,10 @@ const views: View[] = [
 /**
  * The phone's five destinations.
  *
- * Every view stays reachable and keeps its own route — the desktop sidebar still lists all ten.
- * This is only about what a thumb can reach without a menu. The previous bar held all of them and
- * scrolled horizontally, which meant several sat off-screen; the selected tab had to be scrolled
- * into view programmatically just to prove that a tap had done anything.
+ * Every view stays reachable and keeps its own route — the desktop sidebar in `NAV` lists the
+ * same destinations. This is only about what a thumb can reach without a menu. The previous bar
+ * held every view and scrolled horizontally, which meant several sat off-screen; the selected
+ * tab had to be scrolled into view programmatically just to prove that a tap had done anything.
  *
  * `covers` is what makes five tabs enough: a tab stays lit for any view it stands in for, so
  * Vitals reads as selected on both bands and More reads as selected on everything behind it.
@@ -57,6 +57,39 @@ const TABS: Tab[] = [
     covers: ["subcarriers", "zones", "sessions", "health", "wifi"],
   },
 ];
+
+/**
+ * The desktop sidebar: one entry per destination, not one per view.
+ *
+ * Breathing and Heart are the same page with a band switch in its head, so listing them
+ * separately put the identical choice on screen twice — a sidebar that changed the band and a
+ * segmented control that changed the band, neither of which looked like the other's equal. The
+ * switch is the one that belongs to the page, so it is the one that stayed.
+ *
+ * Same `covers` mechanism as the tab bar, for the same reason: the entry has to read as selected
+ * on both routes.
+ */
+interface NavItem {
+  label: string;
+  route: string;
+  covers: string[];
+}
+
+const NAV: NavItem[] = views
+  .filter((view) => view.id !== "heart")
+  .map((view) =>
+    view.id === "breathing"
+      ? { label: "Vitals", route: "breathing", covers: ["breathing", "heart"] }
+      : { label: view.title, route: view.id, covers: [view.id] },
+  );
+
+// Which band the vitals page was last showing. Coming back to the band you left is what makes
+// one entry standing for two routes feel like one destination rather than a reset to breathing.
+let lastVitals = "breathing";
+
+function destination(item: { route: string; covers: string[] }): string {
+  return item.covers.includes(lastVitals) ? lastVitals : item.route;
+}
 
 const MORE: { id: string; blurb: string }[] = [
   { id: "subcarriers", blurb: "A handful of traces, close up — the shape of a single breath" },
@@ -103,6 +136,7 @@ function show(id: string) {
   content.append(view.root);
   view.mount();
   active = view;
+  if (id === "breathing" || id === "heart") lastVitals = id;
 
   syncNav(id);
 
@@ -113,7 +147,7 @@ function show(id: string) {
 
 function syncNav(id: string) {
   for (const button of nav.querySelectorAll("button")) {
-    const isActive = button.dataset.view === id;
+    const isActive = (button.dataset.covers ?? "").split(" ").includes(id);
     button.classList.toggle("nav-active", isActive);
     if (isActive) button.setAttribute("aria-current", "page");
     else button.removeAttribute("aria-current");
@@ -125,9 +159,13 @@ function syncNav(id: string) {
   }
 }
 
-for (const view of views) {
-  const button = el("button", { class: "nav-button", onclick: () => show(view.id) }, view.title);
-  button.dataset.view = view.id;
+for (const item of NAV) {
+  const button = el(
+    "button",
+    { class: "nav-button", onclick: () => show(destination(item)) },
+    item.label,
+  );
+  button.dataset.covers = item.covers.join(" ");
   nav.append(button);
 }
 
@@ -166,7 +204,8 @@ for (const tab of TABS) {
       type: "button",
       role: "tab",
       "aria-selected": "false",
-      onclick: () => (tab.route === null ? openMore() : show(tab.route)),
+      onclick: () =>
+        tab.route === null ? openMore() : show(destination({ ...tab, route: tab.route })),
     },
     icon(tab.glyph),
     el("span", { class: "tab-label" }, tab.label),

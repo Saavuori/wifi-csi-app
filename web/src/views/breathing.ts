@@ -197,9 +197,9 @@ export function vitalsView(band: Band): View {
         el(
           "div",
           { class: "panel-head" },
-          // Both bands share one tab on a phone, so the switch between them lives here. On the
-          // desktop the sidebar lists them separately and this is a second way to the same
-          // place, which is no worse than a duplicate link.
+          // The only band selector, on every layout: the phone reaches both bands through one
+          // Vitals tab and the desktop sidebar through one Vitals entry. Listing the bands in
+          // the sidebar as well put the same choice on screen twice.
           segmented({
             value: band,
             label: "Band",

@@ -10,10 +10,11 @@ import math
 from typing import Any
 
 from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .config import Settings
+from .downlink import encode_history
 from .echo import start_echo
 from .hub import Client, Hub
 from .ingest import start_listener
@@ -94,6 +95,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/wifi")
     async def wifi() -> dict:
         return hub.wifi_report()
+
+    @app.get("/api/nodes/{node_id}/history")
+    async def node_history(node_id: int, seconds: float = 0.0) -> Response:
+        """The node's recent CSI as one binary block, so a fresh client can draw it at once.
+
+        Returns 204 rather than 404 when the ring is empty: a node that has been seen but has
+        not sent anything yet is a normal state on startup, and it is not an error for the
+        client to have asked.
+        """
+        _check_node_id(node_id)
+        span = settings.history_s if seconds <= 0 else min(seconds, settings.history_s)
+        window = hub.history_window(node_id, span)
+        if window is None or len(window) == 0:
+            return Response(status_code=204)
+        return Response(
+            content=encode_history(window, node_id),
+            media_type="application/octet-stream",
+            # The ring moves every frame; a cached copy is wrong by the time it is read.
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.get("/api/nodes/{node_id}/control")
     async def get_node_control(node_id: int) -> dict:

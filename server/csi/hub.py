@@ -56,6 +56,10 @@ from .zonestore import ZoneStore, ZoneStoreFull
 
 log = logging.getLogger("csi.hub")
 
+# Label for the always-on recording started when `record` is set. Retention rolls sessions with
+# this label and leaves hand-started captures alone, so it has to be something the two agree on.
+LIVE_LABEL = "live"
+
 # A client that cannot keep up gets its oldest frames dropped rather than blocking ingest. A
 # second of history is plenty of slack for a browser tab that briefly went to the background.
 CLIENT_QUEUE = 256
@@ -298,7 +302,7 @@ class Hub:
         await asyncio.to_thread(self.zones.rebuild)
         self._metrics_task = asyncio.create_task(self._metrics_loop(), name="csi-metrics")
         if self.settings.record:
-            self.start_recording("live")
+            self.start_recording(LIVE_LABEL)
 
     async def stop(self) -> None:
         # Closing the recorder is the one step here that has data riding on it: it is what writes
@@ -719,6 +723,12 @@ class Hub:
 
             tick += 1
             if tick % prune_every == 0:
+                # Rolling stays on the event loop: it opens and closes the recorder the ingest
+                # callback writes through, and that is only safe because both run here.
+                try:
+                    self._roll_recording()
+                except Exception:
+                    log.exception("rolling the live recording failed")
                 try:
                     await asyncio.to_thread(self._prune_recordings)
                 except Exception:
@@ -726,18 +736,59 @@ class Hub:
                     # down with it would stop the measurement as well as the housekeeping.
                     log.exception("pruning recordings failed")
 
-    def _prune_recordings(self) -> None:
-        """Keep the recordings directory under the configured budget. Runs off the event loop."""
-        budget = int(self.settings.max_disk_gb * 1024**3)
-        if budget <= 0:
+    def _roll_recording(self) -> None:
+        """Close the always-on recording and start a new one once it is `roll_h` old.
+
+        Only the continuous `live` recording rolls. A session someone started by hand is a
+        deliberate capture of something — splitting it in half at an arbitrary minute would
+        break the recording they are in the room making.
+
+        A session with no frames is left alone. It has nothing worth preserving, and rolling it
+        would spend a file per hour on an offline node or on the length of a replay, which
+        suppresses live frames by design.
+        """
+        interval = self.settings.roll_h * 3600.0
+        if interval <= 0 or self.recorder is None:
             return
+        session = self.recorder.session
+        if session.label != LIVE_LABEL or not session.frames:
+            return
+        if time.time() - session.started_at < interval:
+            return
+        log.info("rolling session %s after %.1f h", session.id, self.settings.roll_h)
+        self.start_recording(LIVE_LABEL)
+
+    def _prune_recordings(self) -> None:
+        """Apply the retention rules to the recordings directory. Runs off the event loop.
+
+        Age first, then size. Age is the rule that reflects what the data is for; the byte
+        budget is a backstop for a node writing faster than a day's worth was sized for, and
+        running it second means it only ever has to deal with what age retention left.
+        """
         active = self.recorder.session if self.recorder is not None else None
-        removed = self.sessions.prune(budget, keep=active)
+        removed: list[str] = []
+
+        max_age_s = self.settings.max_age_h * 3600.0
+        if max_age_s > 0:
+            expired = self.sessions.prune_older_than(max_age_s, keep=active)
+            if expired:
+                log.info(
+                    "deleted %d recording(s) older than %.1f h: %s",
+                    len(expired), self.settings.max_age_h, ", ".join(expired),
+                )
+                removed += expired
+
+        budget = int(self.settings.max_disk_gb * 1024**3)
+        if budget > 0:
+            over = self.sessions.prune(budget, keep=active)
+            if over:
+                log.info(
+                    "pruned %d recording(s) to stay under %.1f GB: %s",
+                    len(over), self.settings.max_disk_gb, ", ".join(over),
+                )
+                removed += over
+
         if removed:
-            log.info(
-                "pruned %d recording(s) to stay under %.1f GB: %s",
-                len(removed), self.settings.max_disk_gb, ", ".join(removed),
-            )
             self.broadcast({"type": "sessions_pruned", "session_ids": removed})
 
     async def _emit_metrics(self) -> None:
@@ -798,6 +849,20 @@ class Hub:
         span_s = max(s.presence.window_s, s.breathing.window_s, s.heart.window_s)
         history = ring.seconds(span_s)
         return history if len(history) >= 16 else None
+
+    def history_window(self, node_id: int, seconds: float) -> Window | None:
+        """The newest `seconds` of a node's history, for a client backfilling its waterfall.
+
+        Deliberately not capped to the analysis span the way `history_for` is: this one is for
+        display, and the whole ring is what the client can usefully be given. Copies on the
+        event loop for the same reason `history_for` does — the caller is a request handler, and
+        slicing the live ring while ingest writes to it returns a window torn across the write
+        pointer.
+        """
+        state = self.nodes.get(node_id)
+        if state is None or state.ring is None or len(state.ring) == 0:
+            return None
+        return state.ring.seconds(max(0.0, seconds))
 
     @staticmethod
     def _binding_for(state: NodeState, history: Window) -> Binding:

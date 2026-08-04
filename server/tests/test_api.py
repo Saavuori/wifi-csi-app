@@ -351,3 +351,44 @@ def test_unset_build_args_do_not_become_a_version(monkeypatch):
         assert info["commit"] == ""
     finally:
         version_module.build_info.cache_clear()
+
+
+# -- waterfall backfill ---------------------------------------------------------------------
+
+
+def test_history_is_empty_before_a_node_has_sent_anything(client):
+    """204, not 404: a node that exists but has said nothing yet is a normal startup state."""
+    feed(client.hub, 100)
+    assert client.get("/api/nodes/2/history").status_code == 204
+
+
+def test_history_returns_the_ring_as_one_block(client):
+    from csi.downlink import decode_history
+
+    feed(client.hub, 300)
+    response = client.get("/api/nodes/1/history")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/octet-stream"
+    meta, t_us, amp, agc = decode_history(response.content)
+
+    assert meta["node_id"] == 1
+    assert meta["n_sub"] == 64
+    assert meta["count"] == 300
+    assert amp.shape == (300, 64)
+    assert list(t_us) == sorted(t_us), "columns must be oldest-first, as the waterfall draws them"
+
+
+def test_history_span_is_clamped_to_what_the_ring_holds(client):
+    """A client asking for an hour gets the ring, not an error."""
+    from csi.downlink import decode_history
+
+    feed(client.hub, 300)
+    everything = decode_history(client.get("/api/nodes/1/history").content)[0]
+    asked_for_an_hour = decode_history(client.get("/api/nodes/1/history?seconds=3600").content)[0]
+
+    assert asked_for_an_hour["count"] == everything["count"]
+
+
+def test_history_rejects_an_impossible_node_id(client):
+    assert client.get("/api/nodes/9999/history").status_code == 400
