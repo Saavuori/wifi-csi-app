@@ -1805,6 +1805,129 @@ html.has-fullscreen .tune {
   font-size: var(--t-micro);
 }
 
+/* -- traffic ----------------------------------------------------------------------------- */
+
+/* Wrapping rather than a fixed column count: this row holds six numbers, and on a 320 px screen
+   three of them per line at a readable size beats six of them at an unreadable one. */
+.stat-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s3) var(--s5);
+}
+
+/* Shorter than the analysis plots. It is a context strip for the numbers above it, not the
+   instrument — the instrument on this page is the list of transmitters underneath. */
+.traffic-plot {
+  flex: none;
+  min-height: 132px;
+  height: 132px;
+  margin-top: var(--s3);
+}
+
+.traffic-sources {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.traffic-source {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s2);
+  padding: var(--s2);
+  background: var(--panel-2);
+  border-radius: var(--r-md);
+}
+
+/* The colour key. Same hue as this source's columns in the timeline above and its sparkline to
+   the right, which is the whole mechanism tying the three together. */
+.traffic-swatch {
+  flex: none;
+  width: 3px;
+  align-self: stretch;
+  border-radius: var(--r-pill);
+}
+
+.traffic-source-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+
+.traffic-source-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+
+.traffic-mac {
+  font-family: var(--mono);
+  font-size: var(--t-label);
+}
+
+.traffic-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1) var(--s3);
+  font-size: var(--t-micro);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.traffic-stats .traffic-rate {
+  color: var(--text);
+  font-family: var(--mono);
+}
+
+.traffic-stats .warn {
+  color: var(--warn);
+}
+
+.traffic-ago {
+  color: var(--dim);
+}
+
+.traffic-bar {
+  height: 3px;
+  border-radius: var(--r-pill);
+  background: var(--line);
+  overflow: hidden;
+}
+
+.traffic-bar span {
+  display: block;
+  height: 100%;
+}
+
+/* The same width on every row so the column can be read downwards: they are all normalized to
+   the node's busiest second, which only means anything if the rows are the same size. The size
+   itself is set inline by the view — see SPARK_W in traffic.ts. */
+.traffic-spark {
+  flex: none;
+  align-self: center;
+}
+
+/* Two rows of six statistics each is four wrapped lines on a phone, and the sparkline beside them
+   already answers both of these: whether the source is still active, and at what width it has
+   been transmitting all along. They come back as soon as there is room. */
+@media (max-width: 520px) {
+  .traffic-ago,
+  .traffic-link {
+    display: none;
+  }
+}
+
+.traffic-notes {
+  margin-top: var(--s3);
+}
+
+.traffic-notes .hint {
+  margin: var(--s2) 0 0;
+}
+
 /* -- larger phones ----------------------------------------------------------------------- */
 
 @media (min-width: 400px) {

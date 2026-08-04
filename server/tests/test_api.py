@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -392,3 +393,67 @@ def test_history_span_is_clamped_to_what_the_ring_holds(client):
 
 def test_history_rejects_an_impossible_node_id(client):
     assert client.get("/api/nodes/9999/history").status_code == 400
+
+
+# -- traffic ----------------------------------------------------------------------------------
+
+
+def feed_from(hub, mac: bytes, n=50):
+    """Frames carrying a source MAC, which the synthetic scene does not set."""
+    scene = Scene(SceneConfig())
+    sent = 0
+    while sent < n:
+        frame = scene.next_frame()
+        if frame is None:
+            continue
+        frame.src_mac = mac
+        hub.handle_datagram(encode_frame(frame), time.time())
+        sent += 1
+
+
+def test_traffic_is_empty_before_anything_arrives(client):
+    assert client.get("/api/traffic").json() == {"nodes": []}
+
+
+def test_traffic_attributes_frames_to_their_transmitters(client):
+    ap = bytes.fromhex("b827eb000001")
+    station = bytes.fromhex("b827eb000002")
+    feed_from(client.hub, ap, 60)
+    feed_from(client.hub, station, 20)
+
+    node = client.get("/api/traffic").json()["nodes"][0]
+
+    assert node["node_id"] == 1
+    assert node["frames_window"] == 80
+    assert len(node["counts"]) == node["window_s"]
+    assert [source["mac"] for source in node["sources"]] == [
+        "b8:27:eb:00:00:01",
+        "b8:27:eb:00:00:02",
+    ]
+    assert node["sources"][0]["share"] == pytest.approx(0.75)
+
+
+def test_traffic_names_a_source_the_scan_recognises(client):
+    ap = bytes.fromhex("b827eb000001")
+    feed_from(client.hub, ap, 20)
+    client.post(
+        "/api/nodes/1/control/report",
+        json={
+            "revision": 0,
+            "applied": {"channel": "auto"},
+            "scan": {"aps": [{"bssid": "b8:27:eb:00:00:01", "ssid": "kitchen", "channel": 36}]},
+        },
+    )
+
+    source = client.get("/api/traffic").json()["nodes"][0]["sources"][0]
+    assert source["ap"] is True
+    assert source["ssid"] == "kitchen"
+
+
+def test_the_wifi_overview_still_lists_transmitters(client):
+    """The overview reads the same tracker; its rows are the cumulative view of it."""
+    feed_from(client.hub, bytes.fromhex("b827eb000001"), 30)
+
+    node = client.get("/api/wifi").json()["nodes"][0]
+    assert node["transmitters"][0]["mac"] == "b8:27:eb:00:00:01"
+    assert node["transmitters"][0]["frames"] == 30

@@ -14,6 +14,7 @@ import type {
   ServerEvent,
   Session,
   Snapshot,
+  TrafficNode,
   WifiNode,
   WorkerIn,
   WorkerOut,
@@ -51,6 +52,7 @@ export class Store {
   readonly replay = new Signal<ReplayState | null>(null);
   readonly sessions = new Signal<Session[]>([]);
   readonly wifi = new Signal<WifiNode[]>([]);
+  readonly traffic = new Signal<TrafficNode[]>([]);
   readonly zones = new Signal<ZoneReport | null>(null);
   readonly zoneCapture = new Signal<ZoneCapture | null>(null);
   /** The outcome of the last capture, so a refusal can be shown rather than looking like a
@@ -106,6 +108,23 @@ export class Store {
       const response = await fetch("/api/wifi");
       const body = (await response.json()) as { nodes: WifiNode[] };
       this.wifi.set(body.nodes);
+    } catch {
+      // Offline. The caller polls, and the next tick will pick it up.
+    }
+  }
+
+  /**
+   * Fetch the traffic breakdown: per node, the last two minutes of capture by transmitter.
+   *
+   * Polled rather than pushed. The server buckets by the second, so nothing here can move
+   * faster than 1 Hz, and a table of transmitters riding the 5 Hz metrics broadcast would cost
+   * every connected client more bytes than the analysis it exists to deliver.
+   */
+  async refreshTraffic() {
+    try {
+      const response = await fetch("/api/traffic");
+      const body = (await response.json()) as { nodes: TrafficNode[] };
+      this.traffic.set(body.nodes);
     } catch {
       // Offline. The caller polls, and the next tick will pick it up.
     }

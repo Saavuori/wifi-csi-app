@@ -558,6 +558,16 @@ export function formatDuration(seconds: number): string {
   return `${s}s`;
 }
 
+/** How long ago a server timestamp (seconds since the epoch) was. */
+export function formatAgo(ts: number | null): string {
+  if (ts === null || !Number.isFinite(ts) || ts <= 0) return "never";
+  const seconds = Math.max(0, Date.now() / 1000 - ts);
+  if (seconds < 2) return "just now";
+  if (seconds < 90) return `${Math.round(seconds)}s ago`;
+  if (seconds < 5400) return `${Math.round(seconds / 60)}m ago`;
+  return `${Math.round(seconds / 3600)}h ago`;
+}
+
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   const units = ["KB", "MB", "GB", "TB"];

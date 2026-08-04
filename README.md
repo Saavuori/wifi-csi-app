@@ -90,8 +90,8 @@ room. Both halves:
   [`pi/README.md`](pi/README.md).
 - **The server, in Docker.** Installs Docker if it is missing, raises `net.core.rmem_max`, pulls
   the arm64 image and starts it: UDP ingest, recorder, replayer, the DSP, and the web app —
-  waterfall, subcarriers, motion, zones, breathing, heart rate, placement, sessions and node
-  health. Open `http://<pi>:8080`.
+  waterfall, subcarriers, motion, zones, breathing, heart rate, placement, sessions, node health
+  and the traffic the capture is made of. Open `http://<pi>:8080`.
 
 `--uninstall` reverses all of it. `--help` lists the rest. Details and the compose file are in
 [`deploy/README.md`](deploy/README.md); what the Pi node does and does not measure is in

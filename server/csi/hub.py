@@ -46,11 +46,12 @@ from .dsp.vitals import VitalsEstimator
 from .dsp.zones import Binding, ZoneClassifier
 from .nodecontrol import NodeControlStore
 from .nodes import NodeHealth
-from .protocol import Frame, ProtocolError, parse_frame
+from .protocol import ProtocolError, parse_frame
 from .recorder import Recorder
 from .replay import Replayer
 from .ring import FrameRing, History, Window
 from .sessions import SessionStore
+from .traffic import TrafficTracker
 from .version import build_info
 from .zonestore import ZoneStore, ZoneStoreFull
 
@@ -63,30 +64,6 @@ LIVE_LABEL = "live"
 # A client that cannot keep up gets its oldest frames dropped rather than blocking ingest. A
 # second of history is plenty of slack for a browser tab that briefly went to the background.
 CLIENT_QUEUE = 256
-
-# Distinct transmitters remembered per node. An unfiltered monitor on a busy channel hears a
-# long tail of one-off MACs (probe requests, passers-by); past this many, the quietest and
-# longest-silent are the right ones to forget.
-MAX_TRANSMITTERS = 64
-
-
-@dataclass(slots=True)
-class TransmitterStats:
-    """One source MAC as heard by one node, for the WiFi overview."""
-
-    frames: int = 0
-    rssi: int = 0
-    channel: int = 0
-    last_seen: float = 0.0
-
-    def as_dict(self, mac: bytes) -> dict:
-        return {
-            "mac": mac.hex(":"),
-            "frames": self.frames,
-            "rssi": self.rssi,
-            "channel": self.channel,
-            "last_seen": self.last_seen,
-        }
 
 
 def _same_mask(a: np.ndarray, b: np.ndarray) -> bool:
@@ -172,11 +149,12 @@ class NodeState:
         self.zone = ZoneClassifier(settings.zones)
         self.ring: FrameRing | None = None
         self.last_metrics: dict = {}
-        # Transmitters this node has heard, keyed by source MAC. In monitor mode with no
-        # filter that is every station on the channel; with the AP filter, just the AP. Either
-        # way it costs nothing extra — the MAC is already in every frame — and it is the only
-        # traffic picture the server can draw without asking the node to do anything.
-        self.transmitters: dict[bytes, TransmitterStats] = {}
+        # The traffic this node has heard, per source MAC and per second. In monitor mode with
+        # no filter that is every station on the channel; with the AP filter, just the AP.
+        # Either way it costs nothing extra — the MAC, the RSSI and the arrival time are already
+        # in every frame — and it is the only picture of the air the server can draw without
+        # asking the node to do anything it is not already doing.
+        self.traffic = TrafficTracker()
 
         # Set while this node's analysis is running in a worker thread. The presence detector
         # is stateful — a baseline, a calibration accumulator, a debounced state machine — so
@@ -360,32 +338,22 @@ class Hub:
                 log.info("node %d rebooted; clearing history", frame.node_id)
             state.reset()
 
+        # Traffic is observed on both paths. A recording is a stream of the datagrams that
+        # arrived, source MACs and inter-arrival times included, so replaying one and asking why
+        # the waterfall looked like that is exactly the desk work invariant 3 exists to allow.
+        # There is no risk of mixing two rooms: a running replay suppresses live frames above.
+        state.traffic.observe(frame, received_at)
+
         if replay:
             self.replay_frames += 1
         else:
             self.live_frames += 1
             if self.recorder is not None:
                 self.recorder.write(datagram, frame)
-            if any(frame.src_mac):
-                self._observe_transmitter(state, frame, received_at)
 
         processed = state.pre.process(frame)
         state.ensure_ring(processed).push(processed)
         self._fan_out_frame(processed, replay=replay)
-
-    def _observe_transmitter(self, state: NodeState, frame: Frame, received_at: float) -> None:
-        stats = state.transmitters.get(frame.src_mac)
-        if stats is None:
-            if len(state.transmitters) >= MAX_TRANSMITTERS:
-                quietest = min(
-                    state.transmitters, key=lambda mac: state.transmitters[mac].last_seen
-                )
-                del state.transmitters[quietest]
-            stats = state.transmitters[frame.src_mac] = TransmitterStats()
-        stats.frames += 1
-        stats.rssi = frame.rssi
-        stats.channel = frame.channel
-        stats.last_seen = received_at
 
     def wifi_report(self) -> dict:
         """Everything the WiFi overview needs: per node, its control state, its last scan, and
@@ -396,16 +364,39 @@ class Hub:
         report = []
         for node_id in sorted(node_ids):
             state = self.nodes.get(node_id)
-            transmitters = []
-            if state is not None:
-                transmitters = [
-                    stats.as_dict(mac)
-                    for mac, stats in sorted(
-                        state.transmitters.items(), key=lambda kv: -kv[1].frames
-                    )
-                ]
+            transmitters = state.traffic.transmitters() if state is not None else []
             report.append({**self.control.get(node_id), "transmitters": transmitters})
         return {"nodes": report}
+
+    def traffic_report(self) -> dict:
+        """Per node, the last two minutes of capture broken down by transmitter.
+
+        Only nodes that have actually sent something appear. A configured-but-silent node has a
+        row on the WiFi page, where "asked for, not yet applied" is the subject; here it would
+        be a table of zeroes claiming to describe traffic that was never measured.
+        """
+        report = []
+        for node_id, state in sorted(self.nodes.items()):
+            entry = state.traffic.report(time.time(), aps=self._scanned_aps(node_id))
+            entry["node_id"] = node_id
+            entry["online"] = state.health.online(self.settings.node_timeout_s)
+            report.append(entry)
+        return {"nodes": report}
+
+    def _scanned_aps(self, node_id: int) -> dict[str, str]:
+        """BSSID -> SSID from this node's last scan, for naming the sources that are access
+        points. Empty until a scan has been run, which is honest: without one the server has no
+        way to tell an access point from a station, and guessing from the MAC would be a guess.
+        """
+        scan = self.control.get(node_id).get("scan")
+        if not isinstance(scan, dict):
+            return {}
+        aps = {}
+        for ap in scan.get("aps", []):
+            bssid = str(ap.get("bssid", "")).lower()
+            if bssid:
+                aps[bssid] = str(ap.get("ssid", ""))
+        return aps
 
     def patch_node_control(self, node_id: int, patch: dict) -> dict:
         entry = self.control.patch(node_id, patch)
