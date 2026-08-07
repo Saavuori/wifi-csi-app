@@ -58,7 +58,7 @@ jobs:
       # arm64 is emulated here. Only the pip install runs under it — the front end stage is
       # pinned to the build platform in the Containerfile — and numpy/scipy resolve to
       # prebuilt aarch64 wheels, so nothing in the emulated half actually compiles.
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v4
         with:
           platforms: arm64
 
