@@ -42,7 +42,7 @@ jobs:
 
       - name: Resolve the release type
         id: resolve
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const script = require('./.github/scripts/release-type.js');
