@@ -1,0 +1,88 @@
+version: 2
+
+# Three pinned surfaces: the Python server, the web UI, and the compose file
+# the Pi deployment runs from. There is no Dockerfile in this repo — image.yml
+# builds the image — so there is no `docker` entry to write.
+#
+# Every entry carries a 3-day cooldown: a version that gets yanked shortly
+# after publishing never reaches a PR.
+#
+# PR titles come out as `chore(deps): ...`, which .github/scripts/release-type.js
+# classifies as `skip`. That is deliberate and matches the repo rule: a
+# dependency merge updates the image without cutting a release.
+
+updates:
+  # ---- Python server (pip install -e "server[dev]") ----
+  - package-ecosystem: pip
+    directory: /server
+    schedule:
+      interval: weekly
+      day: monday
+      timezone: Europe/Helsinki
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    labels: [dependencies, python]
+    cooldown:
+      default-days: 3
+    groups:
+      pip-minor-patch:
+        update-types: [minor, patch]
+
+  # ---- Web UI ----
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+      day: monday
+      timezone: Europe/Helsinki
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      prefix-development: chore
+      include: scope
+    labels: [dependencies, frontend]
+    cooldown:
+      default-days: 3
+    groups:
+      npm-minor-patch:
+        update-types: [minor, patch]
+
+  # ---- deploy/ compose service images ----
+  - package-ecosystem: docker-compose
+    directory: /deploy
+    schedule:
+      interval: weekly
+      day: monday
+      timezone: Europe/Helsinki
+    commit-message:
+      prefix: chore
+      include: scope
+    labels: [dependencies, docker]
+    cooldown:
+      default-days: 3
+    ignore:
+      # Our own images are pinned to :latest by design — the host pulls them, so a
+      # PR bumping a tag that never moves is pure noise.
+      - dependency-name: ghcr.io/saavuori/*
+    groups:
+      compose-minor-patch:
+        update-types: [minor, patch]
+
+  # ---- GitHub Actions ----
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      timezone: Europe/Helsinki
+    commit-message:
+      prefix: chore
+      include: scope
+    labels: [dependencies, ci]
+    cooldown:
+      default-days: 3
+    groups:
+      actions-minor-patch:
+        update-types: [minor, patch]
