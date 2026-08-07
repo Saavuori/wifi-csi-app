@@ -51,7 +51,7 @@ jobs:
       - name: Stage the screenshots alongside the page
         run: cp docs/screenshot-*.png site/
 
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@v6
 
       - uses: actions/upload-pages-artifact@v3
         with:
