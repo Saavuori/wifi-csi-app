@@ -47,7 +47,7 @@ jobs:
     # `packages: write` to publish and `actions: write` for the build cache; see ci.yml.
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Empty is checkout's own default — the caller's ref. A release passes its tag, so the
           # release image is built from the tag rather than from whatever the caller happened to

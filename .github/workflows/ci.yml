@@ -27,7 +27,7 @@ jobs:
     name: server tests and lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
@@ -52,7 +52,7 @@ jobs:
     name: firmware host tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # The ring buffer and the wire header compile with a plain host cc — no ESP-IDF, no
       # board. These are the two places where a firmware mistake is invisible on the device.
       - run: ./firmware/scripts/run_host_tests.sh
@@ -61,7 +61,7 @@ jobs:
     name: web typecheck and build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v4
         with:

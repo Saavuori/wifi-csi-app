@@ -42,7 +42,7 @@ jobs:
       version: ${{ steps.next.outputs.version }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # The branch, named, rather than whatever this event checks out by default. On a
           # pull_request event that default is `refs/pull/N/merge`, and the release commit is

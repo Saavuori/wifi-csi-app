@@ -33,7 +33,7 @@ jobs:
     name: classify
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The classifier decides every version this repo ever publishes, and it is shared with
       # the release job, so it is worth more than a code review.
