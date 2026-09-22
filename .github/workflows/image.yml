@@ -69,7 +69,7 @@ jobs:
         # is the *caller's* event, which says nothing about whether this particular build
         # publishes.
         if: inputs.push
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
