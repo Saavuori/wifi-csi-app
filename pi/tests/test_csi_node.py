@@ -1059,6 +1059,31 @@ def test_controller_scans_when_scan_rev_advances(monkeypatch):
     assert scan_post and len(scan_post[0]["scan"]["aps"]) == 2
 
 
+
+def test_a_failing_retune_does_not_kill_the_control_thread(monkeypatch):
+    """`_run_command` raises CalledProcessError, which is neither an OSError nor a URLError.
+    Uncaught, one tune.sh that exits non-zero ended the controller thread for good: the node
+    kept capturing but never polled or reported again, and nothing short of a restart told the
+    UI why its channel changes had stopped landing."""
+    import subprocess
+
+    monkeypatch.setenv("CSI_TUNE_SH", "/opt/csi-node/bin/tune.sh")
+    resp = {"desired": {"channel": "36/80", "stimulus": "auto"}, "revision": 1, "scan_rev": 0}
+    ctrl = FakeController(_node(), responses=[resp], poll_s=0.0)
+    calls = []
+
+    def failing_run(argv, timeout_s=30.0):
+        calls.append(argv)
+        if len(calls) >= 2:
+            ctrl.stop()
+        raise subprocess.CalledProcessError(1, argv, stderr="unsupported channel")
+
+    ctrl.runner = failing_run
+    ctrl.run()  # returns only once stop() is called, from the second attempt
+    assert len(calls) == 2, "the controller must survive the failure and retry"
+    assert ctrl.failures == 2
+    assert ctrl.applied_channel == "auto" and ctrl.applied_rev is None
+
 # -- guard bands, quantizer scaling and the overlong-frame quirk ---------------------------
 
 from csi_node import QUANT_PEAK, data_bins  # noqa: E402
