@@ -38,7 +38,14 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from ..ring import History, Window
-from .util import band_power, detrend, robust_std, uniform_resample, welch_psd
+from .util import (
+    band_nperseg,
+    band_power,
+    detrend,
+    robust_std,
+    uniform_resample,
+    welch_psd,
+)
 
 # Bumped whenever anything in `zone_features` changes the meaning of a vector. The store keeps
 # the raw window for every example, so a bump recomputes from that rather than asking the user to
@@ -135,18 +142,6 @@ class Binding:
             "src_mac": self.src_mac,
         }
 
-    @classmethod
-    def from_dict(cls, raw: dict) -> Binding | None:
-        try:
-            return cls(
-                node_id=int(raw["node_id"]),
-                n_sub=int(raw["n_sub"]),
-                mask_key=str(raw["mask_key"]),
-                src_mac=str(raw.get("src_mac", "")),
-            )
-        except (KeyError, TypeError, ValueError):
-            return None
-
     def differs_from(self, other: Binding) -> str | None:
         """A human-readable reason these are not the same link, or None if they are."""
         if self.node_id != other.node_id:
@@ -176,18 +171,6 @@ def mask_key(mask: np.ndarray) -> str:
 
 
 # -- features ------------------------------------------------------------------------------
-
-
-def _nperseg(config: ZoneConfig, n: int) -> int:
-    """Segment length for the PSD.
-
-    Same rule as `rank_for_band`: resolve the band rather than merely covering it. The motion
-    band is wide, so here the floor of 64 is what binds rather than the band width — and what
-    actually matters is that a sample and a query are segmented identically, which they are
-    because both come through this function with the same window length.
-    """
-    want = int(np.ceil(config.fs * 8 / max(config.band[1] - config.band[0], 1e-3)))
-    return min(n, max(64, want))
 
 
 def zone_features(
@@ -247,7 +230,11 @@ def _band_profile(flat: np.ndarray, config: ZoneConfig) -> np.ndarray | None:
     which subcarriers see more motion than average, which is the Fresnel selectivity that varies
     with position.
     """
-    freqs, psd = welch_psd(flat, config.fs, nperseg=_nperseg(config, flat.shape[0]))
+    # The motion band is wide, so the floor of 64 is what binds here rather than the band width —
+    # and what actually matters is that a sample and a query are segmented identically, which
+    # they are because both come through here with the same window length.
+    nperseg = band_nperseg(config.fs, config.band, flat.shape[0])
+    freqs, psd = welch_psd(flat, config.fs, nperseg=nperseg)
     power = np.asarray(band_power(freqs, psd, config.band[0], config.band[1]), dtype=np.float64)
     if power.ndim == 0 or power.size < 2:
         return None

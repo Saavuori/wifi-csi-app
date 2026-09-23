@@ -19,6 +19,7 @@ from .echo import start_echo
 from .hub import Client, Hub
 from .ingest import start_listener
 from .recorder import scan_recording
+from .sessions import SUGGESTED_LABELS
 from .version import build_info
 
 log = logging.getLogger("csi.api")
@@ -45,7 +46,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="WiFi CSI",
-        version="1.0",
+        version=build_info()["version"],
         docs_url="/api/docs",
         openapi_url="/api/openapi.json",
         lifespan=lifespan,
@@ -155,7 +156,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def list_sessions() -> dict:
         return {
             "sessions": [s.as_dict() for s in hub.sessions.sorted()],
-            "labels": list(_suggested_labels()),
+            "labels": list(SUGGESTED_LABELS),
         }
 
     @app.post("/api/sessions")
@@ -476,9 +477,3 @@ def _apply_client_message(hub: Hub, client: Client, message: dict) -> None:
         hub.recalibrate(_node_id(message.get("node_id")))
     elif kind == "ping":
         client.send({"type": "pong", "t": message.get("t")})
-
-
-def _suggested_labels() -> tuple[str, ...]:
-    from .sessions import SUGGESTED_LABELS
-
-    return SUGGESTED_LABELS

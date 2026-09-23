@@ -16,9 +16,6 @@ from .hub import Hub
 
 log = logging.getLogger("csi.ingest")
 
-# Enough for a 256-subcarrier Nexmon frame with room to spare. Anything larger is not ours.
-MAX_DATAGRAM = 4096
-
 # Ask the kernel for a large receive buffer. The default on Linux is around 200 KB, which is
 # only about a second of two nodes at 80 Hz — a GC pause or a slow disk flush would start
 # dropping frames in the socket, where nothing can count them.

@@ -68,10 +68,6 @@ class Window:
         d = self.duration_s
         return (len(self) - 1) / d if d > 0 else 0.0
 
-    def columns(self, indices: np.ndarray) -> np.ndarray:
-        """Amplitude for a subset of subcarriers, shape (n, len(indices))."""
-        return self.amp[:, indices]
-
     def seconds(self, duration_s: float) -> Window:
         """The newest frames spanning at most `duration_s`, by device timestamp.
 
