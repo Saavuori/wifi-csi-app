@@ -748,3 +748,59 @@ async def test_newly_enabled_subcarriers_are_used_immediately(settings):
     # the ring still holds rows from before the change, not because it is in a fade.
     kept, _ = magnitude_gate(window, 0.0)
     assert set(pilots) <= set(kept.tolist()), "so the analysis must be able to use them"
+
+
+def _evenly_spaced_recording(settings, n: int, spacing_us: int):
+    store = SessionStore(settings.recordings_dir)
+    session = store.create("walking")
+    recorder = Recorder(store, session)
+    for i, blob in enumerate(datagrams(n)):
+        frame = parse_frame(blob)
+        frame.timestamp = i * spacing_us
+        recorder.write(encode_frame(frame), frame)
+    recorder.close()
+    return store.file_for(session)
+
+
+async def test_resuming_a_paused_replay_does_not_burst_the_frames_it_missed(settings):
+    """The schedule is anchored to the wall clock at the start of the pass. A pause stops the
+    pump but not the clock, so without re-anchoring, everything that fell due during the pause
+    went out in one burst on resume — seconds of recording delivered as fast as the loop runs."""
+    from csi.replay import Replayer
+
+    path = _evenly_spaced_recording(settings, 4, 400_000)
+    sent: list[float] = []
+    loop = asyncio.get_running_loop()
+    replayer = Replayer(path, lambda d, t: sent.append(loop.time()), speed=1.0)
+    task = asyncio.create_task(replayer.run())
+    await asyncio.sleep(0.05)
+    replayer.pause()
+    await asyncio.sleep(1.0)
+    assert len(sent) == 1, "nothing may go out while paused"
+    replayer.resume()
+    await asyncio.sleep(0.2)
+    assert len(sent) == 1, "the next frame is 0.4 s after the last one sent, not overdue"
+    await asyncio.wait_for(task, timeout=3.0)
+    gaps = np.diff(sent[1:])
+    assert np.all(gaps > 0.3), f"spacing was not kept after resume: {gaps}"
+
+
+async def test_slowing_a_replay_down_does_not_stall_it(settings):
+    """Changing speed mid-pass re-anchors the schedule at the current position. Without that,
+    dropping from 10x to 1x computed every later frame's due time as if the whole pass had
+    run at 1x, and the pump slept for the difference — nine seconds per ten of recording."""
+    from csi.replay import Replayer
+
+    path = _evenly_spaced_recording(settings, 30, 100_000)
+    sent: list[float] = []
+    loop = asyncio.get_running_loop()
+    replayer = Replayer(path, lambda d, t: sent.append(loop.time()), speed=10.0)
+    task = asyncio.create_task(replayer.run())
+    await asyncio.sleep(0.25)  # ~2.5 s of recording at 10x
+    before = len(sent)
+    assert before >= 10
+    replayer.set_speed(1.0)
+    await asyncio.sleep(0.5)
+    assert len(sent) - before in range(3, 8), "1x after 10x should send ~5 frames in 0.5 s"
+    replayer.stop()
+    await asyncio.wait_for(task, timeout=2.0)

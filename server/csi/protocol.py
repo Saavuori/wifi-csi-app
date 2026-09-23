@@ -221,17 +221,24 @@ INDEX_ENTRY = struct.Struct("<QQ")  # timestamp_us, byte_offset
 _LEN = struct.Struct("<H")
 
 
-def iter_records(fp) -> Iterator[tuple[int, bytes]]:
+def iter_records(fp, offset: int = 0) -> Iterator[tuple[int, bytes]]:
     """Yield (byte_offset, datagram) from an open recording file.
+
+    `offset` is a record boundary to start from, as the sidecar index gives one; 0 means the
+    start of the file, whose magic is checked. The replayer seeks with it, so a scan and a
+    replay read the container through this one loop.
 
     Stops cleanly at the first short read. A recording truncated by a power cut is a normal
     thing to have, not an error — the frames before the tear are still perfectly good.
     """
-    header = fp.read(len(REC_MAGIC))
-    if header != REC_MAGIC:
-        raise ProtocolError(f"not a CSI recording (magic {header!r})")
+    if offset <= 0:
+        header = fp.read(len(REC_MAGIC))
+        if header != REC_MAGIC:
+            raise ProtocolError(f"not a CSI recording (magic {header!r})")
+        offset = len(REC_MAGIC)
+    else:
+        fp.seek(offset)
 
-    offset = len(REC_MAGIC)
     while True:
         raw_len = fp.read(_LEN.size)
         if len(raw_len) < _LEN.size:
