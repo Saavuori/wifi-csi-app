@@ -342,10 +342,14 @@ class ZoneStore:
         self.rebuild()
         return sample
 
-    def delete_sample(self, sample_id: str) -> bool:
+    def delete_sample(self, sample_id: str, *, zone_id: str | None = None) -> bool:
+        """Delete one example. With `zone_id`, only if it belongs to that zone — the HTTP path
+        names both, and an example is not deleted through a zone it is not in."""
         with self._lock:
-            if self._samples.pop(sample_id, None) is None:
+            sample = self._samples.get(sample_id)
+            if sample is None or (zone_id is not None and sample.zone_id != zone_id):
                 return False
+            del self._samples[sample_id]
             self._remove_sample_files(sample_id)
             self._save()
         self.rebuild()

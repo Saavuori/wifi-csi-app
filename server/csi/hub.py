@@ -691,11 +691,6 @@ class Hub:
         )
         return {"ok": True, "sample": sample.as_dict()}
 
-    async def rebuild_zones(self) -> None:
-        """Recompute the zone models off the event loop. Call after any edit."""
-        await asyncio.to_thread(self.zones.rebuild)
-        self.broadcast({"type": "zones"})
-
     # -- analysis -------------------------------------------------------------------------
 
     async def _metrics_loop(self) -> None:

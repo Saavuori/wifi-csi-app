@@ -75,11 +75,6 @@ def uniform_resample(
     return out, fs, coverage
 
 
-def nan_columns(amp: np.ndarray) -> np.ndarray:
-    """Boolean mask of columns containing any NaN, shape (n_sub,)."""
-    return np.isnan(amp).any(axis=0)
-
-
 def robust_std(x: np.ndarray, axis: int | None = None) -> np.ndarray:
     """Median-absolute-deviation standard deviation estimate.
 
@@ -118,6 +113,17 @@ def band_power(
     if not sel.any():
         return np.zeros(psd.shape[1:] if psd.ndim > 1 else ())
     return np.trapezoid(np.take(psd, np.flatnonzero(sel), axis=axis), freqs[sel], axis=axis)
+
+
+def band_nperseg(fs: float, band: tuple[float, float], n: int) -> int:
+    """Welch segment length for a series of `n` samples that resolves `band`, not just covers it.
+
+    At least eight bins across the band, and never under 64 samples. The breathing band is 0.4 Hz
+    wide; Welch's default segmenting gives ~0.2 Hz bins, which puts the whole band in two bins
+    and makes any ranking over it a coin flip. Shared by every caller that compares spectra, so a
+    sample and a query — or a ranking and the tuner number beside it — are segmented alike.
+    """
+    return min(n, max(64, int(np.ceil(fs * 8 / max(band[1] - band[0], 1e-3)))))
 
 
 def welch_psd(

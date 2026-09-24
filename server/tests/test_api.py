@@ -457,3 +457,54 @@ def test_the_wifi_overview_still_lists_transmitters(client):
     node = client.get("/api/wifi").json()["nodes"][0]
     assert node["transmitters"][0]["mac"] == "b8:27:eb:00:00:01"
     assert node["transmitters"][0]["frames"] == 30
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{"speed": "fast"}, {"speed": None}, {"start_us": "soon"}, {"start_us": [1]}],
+)
+def test_starting_a_replay_rejects_nonsense_without_a_500(client, body):
+    """Invariant 8, applied to the replay endpoints: a client typo is a 400, not a 500."""
+    client.post("/api/sessions", json={"label": "empty-room"})
+    feed(client.hub, 100)
+    session = client.post("/api/recording/stop").json()["session"]
+    response = client.post(f"/api/sessions/{session['id']}/replay", json=body)
+    assert response.status_code == 400
+    assert client.get("/api/status").json()["replay"] is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{"action": "speed", "speed": "fast"}, {"action": "seek", "t_us": "later"}],
+)
+def test_replay_control_rejects_nonsense_without_a_500(client, body):
+    client.post("/api/sessions", json={"label": "empty-room"})
+    feed(client.hub, 100)
+    session = client.post("/api/recording/stop").json()["session"]
+    client.post(f"/api/sessions/{session['id']}/replay", json={"speed": 1.0})
+    try:
+        assert client.post("/api/replay/control", json=body).status_code == 400
+    finally:
+        client.post("/api/replay/stop")
+
+
+def test_deleting_an_example_through_another_zone_is_404(client):
+    """The zone in the URL is not decoration. Ignoring it let a stale or mistyped path delete an
+    example from a different zone than the one the request named."""
+    feed(client.hub, 400)
+    kitchen = client.post("/api/zones", json={"name": "Kitchen"}).json()["zone"]["id"]
+    hall = client.post("/api/zones", json={"name": "Hall"}).json()["zone"]["id"]
+    sample = client.hub.zones.add_sample(
+        kitchen,
+        client.hub.history_window(1, 10.0),
+        node_id=1,
+        src_mac="",
+        channel=6,
+        motion_median=0.0,
+        motion_enter=0.0,
+    )
+
+    assert client.delete(f"/api/zones/{hall}/samples/{sample.id}").status_code == 404
+    assert [s["id"] for s in client.get("/api/zones").json()["samples"]] == [sample.id]
+    assert client.delete(f"/api/zones/{kitchen}/samples/{sample.id}").status_code == 200
+    assert client.get("/api/zones").json()["samples"] == []

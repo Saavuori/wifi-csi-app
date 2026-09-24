@@ -19,6 +19,7 @@ from .echo import start_echo
 from .hub import Client, Hub
 from .ingest import start_listener
 from .recorder import scan_recording
+from .sessions import SUGGESTED_LABELS
 from .version import build_info
 
 log = logging.getLogger("csi.api")
@@ -45,7 +46,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="WiFi CSI",
-        version="1.0",
+        version=build_info()["version"],
         docs_url="/api/docs",
         openapi_url="/api/openapi.json",
         lifespan=lifespan,
@@ -155,7 +156,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def list_sessions() -> dict:
         return {
             "sessions": [s.as_dict() for s in hub.sessions.sorted()],
-            "labels": list(_suggested_labels()),
+            "labels": list(SUGGESTED_LABELS),
         }
 
     @app.post("/api/sessions")
@@ -277,7 +278,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.delete("/api/zones/{zone_id}/samples/{sample_id}")
     async def delete_zone_sample(zone_id: str, sample_id: str) -> dict:
-        if not await asyncio.to_thread(hub.zones.delete_sample, sample_id):
+        if not await asyncio.to_thread(hub.zones.delete_sample, sample_id, zone_id=zone_id):
             raise HTTPException(404, "no such example")
         hub.broadcast({"type": "zones"})
         return {"ok": True}
@@ -286,12 +287,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/sessions/{session_id}/replay")
     async def start_replay(session_id: str, body: dict = Body(default={})) -> dict:
+        speed = _client_number(body.get("speed", 1.0), "speed")
+        start_us = body.get("start_us")
+        start_us = int(_client_number(start_us, "start_us")) if start_us is not None else None
         try:
             state = await hub.start_replay(
                 session_id,
-                speed=float(body.get("speed", 1.0)),
+                speed=speed,
                 loop=bool(body.get("loop", False)),
-                start_us=int(body["start_us"]) if body.get("start_us") is not None else None,
+                start_us=start_us,
             )
         except KeyError as exc:
             raise HTTPException(404, "no such session") from exc
@@ -315,9 +319,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         elif action == "resume":
             replayer.resume()
         elif action == "speed":
-            replayer.set_speed(float(body.get("speed", 1.0)))
+            replayer.set_speed(_client_number(body.get("speed", 1.0), "speed"))
         elif action == "seek":
-            hub.seek_replay(int(body.get("t_us", 0)))
+            hub.seek_replay(int(_client_number(body.get("t_us", 0), "t_us")))
         else:
             raise HTTPException(400, f"unknown action {action!r}")
         return {"replay": replayer.state()}
@@ -405,6 +409,24 @@ def _bounded(value: Any, minimum: float, maximum: float, default: float) -> floa
     return min(max(number, minimum), maximum)
 
 
+def _client_number(value: Any, name: str) -> float:
+    """A finite number from a request body, or a 400 that names the field.
+
+    The same rule `Hub.update_config` keeps, for the endpoints that pass a number straight
+    through: a bare `float()` or `int()` on client input turns a typo into a 500. `bool` is
+    refused for the reason `_node_id` gives.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise HTTPException(400, f"{name} must be a number")
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise HTTPException(400, f"{name} must be a number") from exc
+    if not math.isfinite(number):
+        raise HTTPException(400, f"{name} must be finite")
+    return number
+
+
 def _node_id(value: Any) -> int | None:
     """A node id from a client, or None for "all nodes". Raises ValueError on anything else.
 
@@ -455,9 +477,3 @@ def _apply_client_message(hub: Hub, client: Client, message: dict) -> None:
         hub.recalibrate(_node_id(message.get("node_id")))
     elif kind == "ping":
         client.send({"type": "pong", "t": message.get("t")})
-
-
-def _suggested_labels() -> tuple[str, ...]:
-    from .sessions import SUGGESTED_LABELS
-
-    return SUGGESTED_LABELS

@@ -1244,7 +1244,13 @@ class Controller(threading.Thread):
         while not self._stop.is_set():
             try:
                 self._poll_once()
-            except (urllib.error.URLError, OSError, ValueError) as exc:
+            # SubprocessError too: a retune helper that exits non-zero raises CalledProcessError,
+            # which is none of the others, and escaping here ends this thread for good — the node
+            # keeps capturing but never polls or reports again. Nothing is marked applied, so the
+            # next poll retries it.
+            except (
+                urllib.error.URLError, OSError, ValueError, subprocess.SubprocessError
+            ) as exc:
                 self.failures += 1
                 if self.failures in (1, 10) or self.failures % 100 == 0:
                     log.warning("control poll failed (%d so far): %s", self.failures, exc)
@@ -1812,7 +1818,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "note on STIMULUS_TARGET before choosing one")
     p.add_argument("--stimulus-port", type=int,
                    default=int(os.environ.get("CSI_STIMULUS_PORT", str(STIMULUS_PORT))),
-                   help=f"multicast port (default {STIMULUS_PORT})")
+                   help=f"destination UDP port (default {STIMULUS_PORT})")
     p.add_argument("--stimulus-hz", type=float,
                    default=float(os.environ.get("CSI_STIMULUS_HZ", "50")),
                    help="emission rate while armed, 0 to disable (default 50)")

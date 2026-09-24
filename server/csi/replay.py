@@ -14,12 +14,11 @@ from __future__ import annotations
 import asyncio
 import bisect
 import contextlib
-import struct
 import time
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-from .protocol import HEADER_SIZE_V1, REC_MAGIC, ProtocolError
+from .protocol import HEADER_SIZE_V1, iter_records
 from .recorder import read_index
 
 Sink = Callable[[bytes, float], Awaitable[None] | None]
@@ -29,7 +28,6 @@ Sink = Callable[[bytes, float], Awaitable[None] | None]
 # speed almost every frame falls into this bucket, which is how batching happens for free.
 _SLEEP_FLOOR_S = 0.002
 
-_LEN = struct.Struct("<H")
 _TIMESTAMP_AT = 8  # byte offset of the u64 device timestamp in the uplink header
 
 
@@ -62,6 +60,9 @@ class Replayer:
         self._stamps = [entry[0] for entry in self._index]
         self._seek_to: int | None = None
         self._stop = False
+        # Set by anything that invalidates the pacing schedule of the pass in progress. See
+        # `_play_once`.
+        self._rebase = False
         self._resume = asyncio.Event()
         self._resume.set()
         # Set whenever something wants the pump's attention while it is waiting for a frame to
@@ -73,10 +74,14 @@ class Replayer:
     def pause(self) -> None:
         self.playing = False
         self._resume.clear()
+        # Wake a pump that is waiting for a frame to fall due, or that frame goes out anyway
+        # once its time comes, paused or not.
+        self._wake.set()
         self._emit()
 
     def resume(self) -> None:
         self.playing = True
+        self._rebase = True
         self._resume.set()
         self._emit()
 
@@ -84,6 +89,8 @@ class Replayer:
         # 0 means "as fast as the machine can" — for re-analysing an overnight recording in a
         # minute rather than in eight hours.
         self.speed = max(0.0, float(speed))
+        self._rebase = True
+        self._wake.set()
         self._emit()
 
     def seek(self, t_us: int) -> None:
@@ -139,15 +146,9 @@ class Replayer:
         with open(self.path, "rb") as fp:
             wall_start = time.monotonic()
             base_t_us: int | None = None
+            last_sent_us: int | None = None
 
-            for datagram in _records_from(fp, start_offset):
-                if self._stop:
-                    return
-                if not self.playing:
-                    await self._resume.wait()
-                if self._seek_to is not None:
-                    return  # unwind so run() can restart the file at the new offset
-
+            for _offset, datagram in iter_records(fp, start_offset):
                 t_us = _peek_timestamp(datagram)
                 if t_us is None:
                     continue
@@ -162,28 +163,49 @@ class Replayer:
                 if base_t_us is None:
                     base_t_us = t_us
                     wall_start = time.monotonic()
+                    self._rebase = False
 
-                if self.speed > 0:
+                # Wait until this frame is due, re-deciding after every wake-up: a pause, a
+                # resume, a speed change, a seek or a stop can each arrive mid-wait.
+                while True:
+                    if self._stop or self._seek_to is not None:
+                        return  # unwind so run() can stop, or restart at the new offset
+                    if not self.playing:
+                        await self._resume.wait()
+                        continue
+                    if self._rebase:
+                        # The schedule maps device time to wall time from one anchor, and a
+                        # pause or a speed change breaks that mapping. Kept, a pause released
+                        # everything that fell due while paused in one burst, and slowing from
+                        # 10x to 1x slept for nine seconds of every ten already played. So
+                        # re-anchor at the last frame sent: from now, continue at this speed.
+                        self._rebase = False
+                        base_t_us = last_sent_us if last_sent_us is not None else t_us
+                        wall_start = time.monotonic()
+                    if self.speed <= 0:
+                        if self.frames_sent % 512 == 0:
+                            # Full-speed replay must still yield, or the event loop starves and
+                            # the clients watching the replay never receive any of it.
+                            await asyncio.sleep(0)
+                        break
                     due = wall_start + (t_us - base_t_us) / 1e6 / self.speed
                     delay = due - time.monotonic()
-                    if delay > _SLEEP_FLOOR_S:
-                        await self._sleep_until_due(delay)
-                        if self._stop or self._seek_to is not None:
-                            return
-                elif self.frames_sent % 512 == 0:
-                    # Full-speed replay must still yield, or the event loop starves and the
-                    # clients watching the replay never receive any of it.
-                    await asyncio.sleep(0)
+                    if delay <= _SLEEP_FLOOR_S:
+                        break
+                    await self._sleep_until_due(delay)
 
+                if self._stop or self._seek_to is not None:
+                    return
                 self.position_us = t_us
                 self.last_t_us = t_us
+                last_sent_us = t_us
                 self.frames_sent += 1
                 result = self.sink(datagram, time.time())
                 if result is not None:
                     await result
 
     async def _sleep_until_due(self, delay: float) -> None:
-        """Wait for a frame to fall due, or for stop/seek — whichever comes first.
+        """Wait for a frame to fall due, or for anything that changes when it is due.
 
         A plain sleep here is a promise the recording is not obliged to keep. Nothing says the
         frames are evenly spaced: a node that was off for a minute leaves a minute-long hole,
@@ -193,7 +215,7 @@ class Replayer:
         the wait rather than only being seen between frames.
         """
         self._wake.clear()
-        if self._stop or self._seek_to is not None:
+        if self._stop or self._seek_to is not None or not self.playing or self._rebase:
             return
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(self._wake.wait(), delay)
@@ -204,26 +226,6 @@ class Replayer:
             return 0
         i = bisect.bisect_right(self._stamps, t_us) - 1
         return self._index[i][1] if i >= 0 else 0
-
-
-def _records_from(fp, offset: int) -> Iterator[bytes]:
-    """Yield length-prefixed datagrams starting at a byte offset (0 means after the header)."""
-    if offset <= 0:
-        magic = fp.read(len(REC_MAGIC))
-        if magic != REC_MAGIC:
-            raise ProtocolError(f"not a CSI recording (magic {magic!r})")
-    else:
-        fp.seek(offset)
-
-    while True:
-        raw = fp.read(_LEN.size)
-        if len(raw) < _LEN.size:
-            return
-        (length,) = _LEN.unpack(raw)
-        payload = fp.read(length)
-        if len(payload) < length:
-            return
-        yield payload
 
 
 def _peek_timestamp(datagram: bytes) -> int | None:

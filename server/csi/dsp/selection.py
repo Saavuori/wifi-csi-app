@@ -20,7 +20,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from ..ring import Window
-from .util import band_power, detrend, uniform_resample, welch_psd
+from .util import band_nperseg, band_power, detrend, uniform_resample, welch_psd
 
 # Respiration, per the PulseFi filter parameters: 6-30 breaths/min.
 BREATHING_BAND = (0.1, 0.5)
@@ -147,10 +147,8 @@ def rank_for_band(
     if series.shape[0] < 16:
         return Selection(kept, np.zeros(kept.size), rejected, "band_snr")
 
-    # Segment length must resolve the band, not just cover it. The breathing band is 0.4 Hz
-    # wide; Welch's default segmenting would give ~0.2 Hz bins, which puts the whole band in
-    # two bins and makes the ranking a coin flip. Ask for at least eight bins across the band.
-    nperseg = min(series.shape[0], max(64, int(np.ceil(fs * 8 / max(band[1] - band[0], 1e-3)))))
+    # Segment length must resolve the band, not just cover it; see `band_nperseg`.
+    nperseg = band_nperseg(fs, band, series.shape[0])
     freqs, psd = welch_psd(detrend(series), fs, nperseg=nperseg)
     in_band = band_power(freqs, psd, band[0], band[1])
     total = band_power(freqs, psd, 0.02, fs / 2)
@@ -201,7 +199,7 @@ def band_snr_db(
     if series.shape[0] < 32:
         return -60.0
 
-    nperseg = min(series.shape[0], max(64, int(np.ceil(fs * 8 / max(band[1] - band[0], 1e-3)))))
+    nperseg = band_nperseg(fs, band, series.shape[0])
     freqs, psd = welch_psd(detrend(series), fs, nperseg=nperseg)
 
     in_band = (freqs >= band[0]) & (freqs <= band[1])

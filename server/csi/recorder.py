@@ -43,10 +43,6 @@ class Recorder:
         self._nodes: set[int] = set(session.node_ids)
         self._last_flush = time.monotonic()
 
-    @property
-    def closed(self) -> bool:
-        return self._fp.closed
-
     def write(self, datagram: bytes, frame: Frame) -> None:
         blob = record_bytes(datagram)
 
