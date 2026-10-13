@@ -11,6 +11,8 @@ version: 2
 # classifies as `skip`. That is deliberate and matches the repo rule: a
 # dependency merge updates the image without cutting a release.
 
+# Majors are ignored on every entry: they are upgraded by hand rather than
+# proposed as PRs that sit open waiting for a review.
 updates:
   # ---- Python server (pip install -e "server[dev]") ----
   - package-ecosystem: pip
@@ -26,6 +28,9 @@ updates:
     labels: [dependencies, python]
     cooldown:
       default-days: 3
+    ignore:
+      - dependency-name: "*"
+        update-types: [version-update:semver-major]
     groups:
       pip-minor-patch:
         update-types: [minor, patch]
@@ -45,6 +50,9 @@ updates:
     labels: [dependencies, frontend]
     cooldown:
       default-days: 3
+    ignore:
+      - dependency-name: "*"
+        update-types: [version-update:semver-major]
     groups:
       npm-minor-patch:
         update-types: [minor, patch]
@@ -63,6 +71,8 @@ updates:
     cooldown:
       default-days: 3
     ignore:
+      - dependency-name: "*"
+        update-types: [version-update:semver-major]
       # Our own images are pinned to :latest by design — the host pulls them, so a
       # PR bumping a tag that never moves is pure noise.
       - dependency-name: ghcr.io/saavuori/*
@@ -83,6 +93,9 @@ updates:
     labels: [dependencies, ci]
     cooldown:
       default-days: 3
+    ignore:
+      - dependency-name: "*"
+        update-types: [version-update:semver-major]
     groups:
       actions-minor-patch:
         update-types: [minor, patch]
